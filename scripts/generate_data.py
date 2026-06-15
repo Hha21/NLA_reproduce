@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
+import os
 import numpy as np
 
 from src.config import DEVICE
@@ -47,5 +48,6 @@ print(f"\nSaved {len(ds)} samples to {OUT_DIR}")
 print(f"Activation norms — mean: {norms.mean():.2f}  std: {norms.std():.2f}"
       f"  min: {norms.min():.2f}  max: {norms.max():.2f}")
 
-# Force clean exit before Python's finalizer hits PyTorch's CUDA threads.
-sys.exit(0)
+# os._exit skips Python's finalizers entirely, preventing the GIL crash
+# from PyTorch's CUDA threads and the streaming dataset's download threads.
+os._exit(0)

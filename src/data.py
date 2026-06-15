@@ -18,6 +18,7 @@ Design decisions:
 
 import numpy as np
 import torch
+from torch.utils.data import Dataset as TorchDataset
 from datasets import Dataset, load_dataset
 from tqdm import tqdm
 
@@ -40,7 +41,9 @@ def make_extractor(target):
     acts = {}
 
     def _hook(module, inp, out):
-        acts["resid"] = out[0].detach()   # (1, seq, hidden_size)
+        # Newer transformers returns a plain tensor; older versions return a tuple.
+        h = out[0] if isinstance(out, tuple) else out
+        acts["resid"] = h.detach()        # (batch, seq, hidden_size)
 
     handle = target.model.layers[PROBE_LAYER].register_forward_hook(_hook)
 
@@ -101,3 +104,23 @@ def build_dataset(
 
     handle.remove()
     return Dataset.from_dict(rows)
+
+
+class ActivationDataset(TorchDataset):
+    """
+    Wraps a HuggingFace Dataset into a plain PyTorch Dataset.
+
+    Pre-loading texts and activations as Python lists / numpy arrays means
+    the DataLoader receives simple (str, ndarray) tuples — avoiding the
+    __getitems__ fast-path in newer datasets+PyTorch that mangles shapes.
+    """
+
+    def __init__(self, hf_dataset):
+        self.texts       = hf_dataset["text_truncated"]
+        self.activations = np.stack(hf_dataset["activation"]).astype(np.float32)
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        return self.texts[idx], self.activations[idx]   # (str, ndarray 896)
