@@ -12,20 +12,36 @@ target scale. See `WORK_PLAN.md` for the full learning-first approach.
 ```
 NLA_reproduce/
 ├── .gitignore
-├── .venv/                   # local virtual environment (not committed)
+├── .venv/                        # local virtual environment (not committed)
 ├── README.md
 ├── WORK_PLAN.md
 ├── requirements.txt
-├── scripts/                 # one runnable script per phase
-│   ├── phase00_load_model.py        # Phase 0 — load model, confirm shapes
-│   ├── phase01_activation_harness.py   (upcoming)
-│   ├── phase02_reconstructor.py        (upcoming)
-│   ├── phase03_verbalizer.py           (upcoming)
-│   ├── phase04_warmstart.py            (upcoming)
-│   └── phase05_grpo.py                 (upcoming)
-├── data/                    # raw text snippets — gitignored
-├── activations/             # cached (snippet, activation) pairs — gitignored
-└── checkpoints/             # saved model weights during training — gitignored
+├── src/                          # shared library — imported by all scripts
+│   ├── config.py                 #   MODEL_ID, PROBE_LAYER, DEVICE, DTYPE
+│   ├── model.py                  #   load_target(), load_tokenizer()
+│   ├── data.py                   #   activation extraction, (text, activation) dataset
+│   ├── ar.py                     #   Reconstructor: text → activation̂
+│   ├── av.py                     #   Verbalizer: activation → text description
+│   └── train.py                  #   AR supervised loop + AV GRPO loop + FVE metric
+├── scripts/                      # thin entry points — run these directly
+│   ├── phase00_load_model.py     #   sanity check: load model, confirm shapes
+│   ├── generate_data.py          #   build and cache (text, activation) pairs
+│   ├── train_ar_baseline.py      #   AR on ground-truth text → oracle FVE ceiling
+│   ├── train_warmstart.py        #   SFT warm-start for AV before RL
+│   └── train_grpo.py             #   full AV + AR GRPO training
+├── data/                         # raw text snippets — gitignored
+├── activations/                  # cached (text, activation) pairs — gitignored
+└── checkpoints/                  # saved model weights during training — gitignored
+```
+
+### Order of execution
+
+```
+scripts/phase00_load_model.py     # once — verify GPU and model load
+scripts/generate_data.py          # once — build the activation dataset
+scripts/train_ar_baseline.py      # establishes the oracle FVE ceiling
+scripts/train_warmstart.py        # warm-starts AV with SFT
+scripts/train_grpo.py             # full NLA training
 ```
 
 ---
