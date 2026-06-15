@@ -1,0 +1,36 @@
+# --- Model weights ---
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# --- Datasets and cached activations ---
+data/
+activations/
+*.arrow
+*.parquet
+
+# --- Training artefacts ---
+checkpoints/
+runs/
+wandb/
+*.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- HuggingFace cache if redirected locally ---
+.cache/
+
+# --- OS ---
+.DS_Store

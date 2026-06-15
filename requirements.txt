@@ -1,0 +1,11 @@
+# Core
+torch>=2.3.0
+transformers>=4.43.0
+accelerate>=0.30.0
+
+# Data
+datasets>=2.20.0
+
+# Utilities
+numpy>=1.26.0
+tqdm>=4.66.0
