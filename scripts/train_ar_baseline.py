@@ -34,13 +34,18 @@ parser.add_argument("--data-dir",      default="activations/dataset")
 parser.add_argument("--n-epochs",      type=int,   default=5)
 parser.add_argument("--batch-size",    type=int,   default=16)
 parser.add_argument("--lr",            type=float, default=None,
-                    help="Learning rate (default: 1e-5 with --unfreeze-base, 3e-4 head-only)")
+                    help="Head LR (default: 1e-5 with --unfreeze-base, 3e-4 head-only)")
+parser.add_argument("--base-lr",       type=float, default=None,
+                    help="Base LR when --unfreeze-base (default: lr/10). "
+                         "Ignored when freeze_base=True.")
 parser.add_argument("--unfreeze-base", action="store_true",
                     help="Fine-tune the full transformer, not just the linear head")
 args = parser.parse_args()
 
 if args.lr is None:
-    args.lr = 1e-5 if args.unfreeze_base else 3e-4
+    args.lr = 1e-4 if args.unfreeze_base else 3e-4
+if args.unfreeze_base and args.base_lr is None:
+    args.base_lr = args.lr / 10
 
 # --- Dataset ---
 print("Loading dataset...")
@@ -70,6 +75,7 @@ ar = train_ar(
     n_epochs   = args.n_epochs,
     batch_size = args.batch_size,
     lr         = args.lr,
+    base_lr    = args.base_lr if not freeze else None,
 )
 
 # --- Save ---
