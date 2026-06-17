@@ -5,7 +5,7 @@ Architecture (per paper):
   - Base: the transformer body of T truncated to its first PROBE_LAYER layers.
     The final-layer norm is removed so last_hidden_state = raw x_l (matching
     the hook-captured activation stored in the dataset).
-  - Head: affine Linear(d_model, d_model, bias=True), always trainable.
+  - Head: Linear(d_model, d_model, bias=False), always trainable.
   - Input:  AR_PREFIX + z + AR_SUFFIX  (z = original text for oracle; AV
             description during GRPO). The last-token hidden state at layer l
             is the "value head" position.
@@ -26,7 +26,7 @@ class Reconstructor(nn.Module):
     def __init__(self, base, d_model: int):
         super().__init__()
         self.base = base
-        self.head = nn.Linear(d_model, d_model, bias=True)   # affine, per paper
+        self.head = nn.Linear(d_model, d_model, bias=False)   # no bias, per reference impl
 
     def forward(
         self,
@@ -67,4 +67,7 @@ def load_ar(device: str, freeze_base: bool = True) -> Reconstructor:
     d  = full_model.config.hidden_size
     ar = Reconstructor(base, d)
     ar.head = ar.head.to(device=device, dtype=DTYPE)
+    # Identity init: output = x_l, a better starting point than random.
+    # Reference impl notes this gives loss ~1.61 vs ~1.94 at step 0.
+    nn.init.eye_(ar.head.weight)
     return ar

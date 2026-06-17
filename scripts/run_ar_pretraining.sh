@@ -16,7 +16,8 @@ python scripts/train_ar_baseline.py \
   --text-col summary \
   --n-epochs 30 \
   --batch-size 32 \
-  --lr 3e-4 \
+  --lr 2e-5 \
+  --unfreeze-base \
   2>&1 | tee -a "$LOG"
 
 echo "Finished: $(date)" | tee -a "$LOG"

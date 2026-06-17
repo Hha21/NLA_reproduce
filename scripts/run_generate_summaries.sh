@@ -7,8 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
 
-if [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
-    echo "ERROR: OPENROUTER_API_KEY is not set."
+if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+    echo "ERROR: DEEPSEEK_API_KEY is not set."
     exit 1
 fi
 
@@ -19,8 +19,8 @@ echo "Logging to $LOG"
 echo "Started: $(date)" | tee -a "$LOG"
 
 python scripts/generate_summaries.py \
-  --model "deepseek/deepseek-chat" \
-  --concurrency 32 \
+  --model "deepseek-v4-flash" \
+  --concurrency 50 \
   2>&1 | tee -a "$LOG"
 
 echo "Finished: $(date)" | tee -a "$LOG"
