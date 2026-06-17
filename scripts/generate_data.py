@@ -17,14 +17,16 @@ import os
 import numpy as np
 
 from src.config import DEVICE
-from src.data import build_dataset
+from src.data import POSITIONS_PER_DOC, build_dataset
 from src.model import load_target, load_tokenizer
 
 OUT_DIR = Path("activations/dataset")
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--n-samples",  type=int, default=5_000)
-parser.add_argument("--overwrite",  action="store_true")
+parser.add_argument("--n-samples",         type=int, default=5_000)
+parser.add_argument("--positions-per-doc", type=int, default=POSITIONS_PER_DOC,
+                    help="Extraction points sampled per document (default: %(default)s)")
+parser.add_argument("--overwrite",         action="store_true")
 args = parser.parse_args()
 
 if OUT_DIR.exists() and not args.overwrite:
@@ -35,19 +37,20 @@ print("Loading model and tokenizer...")
 tok    = load_tokenizer()
 target = load_target(DEVICE)
 
-print(f"Building dataset ({args.n_samples} samples)...")
-ds = build_dataset(target, tok, n_samples=args.n_samples)
+print(f"Building dataset ({args.n_samples} samples, {args.positions_per_doc} positions/doc)...")
+ds = build_dataset(
+    target, tok,
+    n_samples=args.n_samples,
+    positions_per_doc=args.positions_per_doc,
+)
 
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 ds.save_to_disk(str(OUT_DIR))
 
-# Print activation norm statistics — useful later for reward scaling in GRPO.
 acts  = np.stack(ds["activation"])
 norms = np.linalg.norm(acts, axis=-1)
 print(f"\nSaved {len(ds)} samples to {OUT_DIR}")
 print(f"Activation norms — mean: {norms.mean():.2f}  std: {norms.std():.2f}"
       f"  min: {norms.min():.2f}  max: {norms.max():.2f}")
 
-# os._exit skips Python's finalizers entirely, preventing the GIL crash
-# from PyTorch's CUDA threads and the streaming dataset's download threads.
 os._exit(0)

@@ -40,6 +40,9 @@ parser.add_argument("--base-lr",       type=float, default=None,
                          "Ignored when freeze_base=True.")
 parser.add_argument("--unfreeze-base", action="store_true",
                     help="Fine-tune the full transformer, not just the linear head")
+parser.add_argument("--text-col",      default="text_truncated",
+                    help="Dataset column to use as AR input text "
+                         "(text_truncated for oracle, summary for warm-start)")
 args = parser.parse_args()
 
 if args.lr is None:
@@ -76,6 +79,7 @@ ar = train_ar(
     batch_size = args.batch_size,
     lr         = args.lr,
     base_lr    = args.base_lr if not freeze else None,
+    text_col   = args.text_col,
 )
 
 # --- Save ---

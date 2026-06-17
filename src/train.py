@@ -58,6 +58,7 @@ def train_ar(
     base_lr: float  = None,
     max_length: int = 256,
     val_frac: float = 0.1,
+    text_col: str   = "text_truncated",
 ):
     """
     Supervised AR training: text → activation regression.
@@ -71,8 +72,8 @@ def train_ar(
     """
     n_val   = max(1, int(len(dataset) * val_frac))
     n_train = len(dataset) - n_val
-    train_ds = ActivationDataset(dataset.select(range(n_train)))
-    val_ds   = ActivationDataset(dataset.select(range(n_train, len(dataset))))
+    train_ds = ActivationDataset(dataset.select(range(n_train)),         text_col=text_col)
+    val_ds   = ActivationDataset(dataset.select(range(n_train, len(dataset))), text_col=text_col)
 
     collate      = partial(_collate, tok=tok, max_length=max_length, device=device)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate)

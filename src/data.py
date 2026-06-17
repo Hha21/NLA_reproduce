@@ -2,18 +2,19 @@
 Activation extraction and dataset utilities.
 
 Design decisions:
-  - Corpus: wikitext-103-raw-v1. Small enough to iterate fast, clean English
-    prose, enough topical variety for the bottleneck to be meaningful.
-  - Token position: we sample a random position per document (at least
-    MIN_POSITION tokens in). Sampling rather than always taking the last token
-    gives more diverse context lengths and avoids the model always seeing a
-    sentence-final token.
-  - What we store as text: the text *truncated at the extraction point*.
-    The activation only "saw" tokens up to that position, so giving AR the
-    full document would hand it information that didn't exist when the
-    activation was computed.
+  - Corpus: FineWeb sample-10BT (HuggingFaceFW/fineweb). Higher diversity and
+    longer documents than wikitext, matching the paper's data source. Streamed
+    so the full 10BT corpus never hits disk.
+  - Positions per document: up to POSITIONS_PER_DOC extraction points are
+    sampled per document (matching the paper's --positions-per-doc 10). This
+    is more efficient than 1-per-doc and gives varied context lengths within
+    each document.
+  - MIN_POSITION: 64 tokens minimum context. FineWeb docs are longer than
+    wikitext snippets so a higher floor gives more meaningful truncated texts
+    and better summaries downstream.
+  - What we store as text: the text truncated at the extraction point.
+    The activation only "saw" tokens up to that position.
   - Activation: stored as float32 numpy array (hidden_size,), unnormalised.
-    Normalisation is applied at training time so we can tune it independently.
 """
 
 import numpy as np
@@ -24,8 +25,9 @@ from tqdm import tqdm
 
 from src.config import DEVICE, PROBE_LAYER
 
-_CORPUS       = ("Salesforce/wikitext", "wikitext-103-raw-v1")
-MIN_POSITION  = 32   # minimum tokens of context before the extraction point
+_CORPUS           = ("HuggingFaceFW/fineweb", "sample-10BT")
+MIN_POSITION      = 64    # minimum tokens before the extraction point
+POSITIONS_PER_DOC = 10    # extraction points sampled per document
 
 
 def make_extractor(target):
@@ -58,13 +60,14 @@ def make_extractor(target):
 def build_dataset(
     target,
     tok,
-    n_samples: int = 5_000,
-    min_position: int = MIN_POSITION,
-    seed: int = 42,
+    n_samples: int          = 5_000,
+    min_position: int       = MIN_POSITION,
+    positions_per_doc: int  = POSITIONS_PER_DOC,
+    seed: int               = 42,
 ) -> Dataset:
     """
-    Stream wikitext-103, extract one activation per document, return a
-    HuggingFace Dataset with columns:
+    Stream FineWeb sample-10BT, extract up to positions_per_doc activations
+    per document, return a HuggingFace Dataset with columns:
 
       text_truncated  str        — text the model saw up to extraction point
       activation      float32[]  — residual-stream vector, shape (hidden_size,)
@@ -90,15 +93,23 @@ def build_dataset(
             if len(ids) <= min_position:
                 continue
 
-            # Sample extraction point; last token of the truncated sequence.
-            pos       = int(rng.integers(min_position, len(ids)))
-            trunc_ids = ids[: pos + 1].to(DEVICE)
-            trunc_text = tok.decode(trunc_ids.cpu(), skip_special_tokens=True)
+            # Sample up to positions_per_doc distinct extraction points.
+            n_valid = len(ids) - min_position
+            n_pos   = min(positions_per_doc, n_valid)
+            offsets = rng.choice(n_valid, size=n_pos, replace=False)
+            positions = sorted(min_position + offsets)
 
-            rows["text_truncated"].append(trunc_text)
-            rows["activation"].append(extract(trunc_ids))
+            for pos in positions:
+                trunc_ids  = ids[: pos + 1].to(DEVICE)
+                trunc_text = tok.decode(trunc_ids.cpu(), skip_special_tokens=True)
 
-            pbar.update(1)
+                rows["text_truncated"].append(trunc_text)
+                rows["activation"].append(extract(trunc_ids))
+
+                pbar.update(1)
+                if len(rows["text_truncated"]) >= n_samples:
+                    break
+
             if len(rows["text_truncated"]) >= n_samples:
                 break
 
@@ -115,8 +126,8 @@ class ActivationDataset(TorchDataset):
     __getitems__ fast-path in newer datasets+PyTorch that mangles shapes.
     """
 
-    def __init__(self, hf_dataset):
-        self.texts       = hf_dataset["text_truncated"]
+    def __init__(self, hf_dataset, text_col: str = "text_truncated"):
+        self.texts       = hf_dataset[text_col]
         self.activations = np.stack(hf_dataset["activation"]).astype(np.float32)
 
     def __len__(self):

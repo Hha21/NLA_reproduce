@@ -9,3 +9,6 @@ datasets>=2.20.0
 # Utilities
 numpy>=1.26.0
 tqdm>=4.66.0
+
+# Summary generation (OpenRouter / OpenAI-compatible API)
+openai>=1.30.0
