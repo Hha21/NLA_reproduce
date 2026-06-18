@@ -99,6 +99,7 @@ def train_ar(
             a_hat = ar(input_ids, attn_mask).float()   # bf16 → float32
             loss  = F.mse_loss(a_hat, acts)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(ar.parameters(), 1.0)
             opt.step()
             total_loss += loss.item()
 

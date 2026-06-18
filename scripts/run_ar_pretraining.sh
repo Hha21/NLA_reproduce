@@ -16,7 +16,7 @@ python scripts/train_ar_baseline.py \
   --text-col summary \
   --n-epochs 30 \
   --batch-size 32 \
-  --lr 2e-5 \
+  --lr 1e-4 \
   --unfreeze-base \
   2>&1 | tee -a "$LOG"
 

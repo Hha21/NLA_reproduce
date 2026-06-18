@@ -1,9 +1,51 @@
 # NLA Reproduce
 
-A from-scratch implementation of the Natural Language Autoencoder (NLA) pipeline,
-following the [Anthropic NLA paper](https://transformer-circuits.pub/2026/nla/).
-Built phase-by-phase on **Qwen2.5-0.5B** for fast iteration, with Llama 3.2 1B as the
-target scale. See `WORK_PLAN.md` for the full learning-first approach.
+A from-scratch reproduction of the [Natural Language Autoencoder](https://transformer-circuits.pub/2026/nla/) (Anthropic, 2026) pipeline.
+Built on **Qwen2.5-0.5B** (paper uses 7B) for GPU budget reasons. Reference code: [kitft/natural_language_autoencoders](https://github.com/kitft/natural_language_autoencoders).
+
+See [METHOD_PIPELINE.md](METHOD_PIPELINE.md) for a detailed walkthrough of every stage with implementation notes, design decisions, and divergences from the paper.
+
+---
+
+## Progress
+
+| Stage | Description | Status | Result |
+|---|---|---|---|
+| 0 | Activation extraction (FineWeb → dataset) | ✅ Complete | 100K (text, h_l) pairs |
+| 1 | LLM explanation generation | ✅ Complete | 83K summaries, DeepSeek V4-Flash |
+| 2 | AR warm-start training | ✅ Complete | val FVE ≈ 0.43 |
+| 3 | AV warm-start training | ⏳ Pending | — |
+| 4 | Joint GRPO training | ⏳ Pending | — |
+
+---
+
+## Quick start
+
+```bash
+# 1. Create environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# PyTorch with CUDA (replace cu121 with your version: nvcc --version)
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# 2. Verify GPU
+python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+# 3. Run stages in order
+python scripts/phase00_load_model.py          # sanity check
+
+./scripts/run_generate_data.sh                # Stage 0: extract activations
+
+export DEEPSEEK_API_KEY=sk-...
+./scripts/run_generate_summaries.sh           # Stage 1: generate explanations
+
+./scripts/run_ar_pretraining.sh               # Stage 2: AR warm-start
+```
+
+Model weights (~1 GB for Qwen2.5-0.5B) are downloaded automatically from HuggingFace on first run.
 
 ---
 
@@ -11,80 +53,34 @@ target scale. See `WORK_PLAN.md` for the full learning-first approach.
 
 ```
 NLA_reproduce/
-├── .gitignore
-├── .venv/                        # local virtual environment (not committed)
 ├── README.md
-├── WORK_PLAN.md
+├── METHOD_PIPELINE.md            # detailed stage-by-stage pipeline documentation
+├── REPRODUCE_LOG.md              # issues found and fixed during reproduction
 ├── requirements.txt
-├── src/                          # shared library — imported by all scripts
-│   ├── config.py                 #   MODEL_ID, PROBE_LAYER, DEVICE, DTYPE
+├── src/                          # shared library
+│   ├── config.py                 #   MODEL_ID, PROBE_LAYER, DEVICE, DTYPE, AR prompt
 │   ├── model.py                  #   load_target(), load_tokenizer()
-│   ├── data.py                   #   activation extraction, (text, activation) dataset
-│   ├── ar.py                     #   Reconstructor: text → activation̂
-│   ├── av.py                     #   Verbalizer: activation → text description
-│   └── train.py                  #   AR supervised loop + AV GRPO loop + FVE metric
-├── scripts/                      # thin entry points — run these directly
-│   ├── phase00_load_model.py     #   sanity check: load model, confirm shapes
-│   ├── generate_data.py          #   build and cache (text, activation) pairs
-│   ├── train_ar_baseline.py      #   AR on ground-truth text → oracle FVE ceiling
-│   ├── train_warmstart.py        #   SFT warm-start for AV before RL
-│   └── train_grpo.py             #   full AV + AR GRPO training
-├── data/                         # raw text snippets — gitignored
-├── activations/                  # cached (text, activation) pairs — gitignored
-└── checkpoints/                  # saved model weights during training — gitignored
-```
-
-### Order of execution
-
-```
-scripts/phase00_load_model.py     # once — verify GPU and model load
-scripts/generate_data.py          # once — build the activation dataset
-scripts/train_ar_baseline.py      # establishes the oracle FVE ceiling
-scripts/train_warmstart.py        # warm-starts AV with SFT
-scripts/train_grpo.py             # full NLA training
+│   ├── data.py                   #   activation extraction, ActivationDataset
+│   ├── ar.py                     #   Reconstructor: text → â ∈ ℝ⁸⁹⁶
+│   ├── av.py                     #   Verbalizer: h_l → text description (stub)
+│   └── train.py                  #   train_ar(), fve() metric
+├── scripts/                      # entry points — run via shell scripts
+│   ├── phase00_load_model.py     #   verify GPU and model load
+│   ├── generate_data.py          #   Stage 0: build (text, activation) dataset
+│   ├── generate_summaries.py     #   Stage 1: LLM explanation generation
+│   ├── train_ar_baseline.py      #   Stage 2: AR warm-start
+│   ├── train_warmstart.py        #   Stage 3: AV warm-start (pending)
+│   └── train_grpo.py             #   Stage 4: joint GRPO training (pending)
+├── activations/                  # dataset and checkpoints — gitignored
+└── checkpoints/                  # saved model weights — gitignored
 ```
 
 ---
 
-## Environment setup
+## Key design choices
 
-This project uses a standard Python `venv` (no conda required).
+**Why Qwen2.5-0.5B?** The paper uses 7B, which requires ~84GB for full-model SFT — beyond the 48GB available (2× RTX 4090). The 0.5B model fits comfortably and the pipeline is otherwise identical.
 
-**Create and activate the environment:**
+**Why DeepSeek V4-Flash for explanations?** The paper uses Claude Opus 4.5; the reference codebase uses Claude Haiku. DeepSeek V4-Flash is cost-equivalent to Haiku (~$4/100K explanations vs ~$75 for Opus) and follows structured prompts reliably.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-**Install dependencies:**
-
-```bash
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-For PyTorch with CUDA (replace `cu121` with your CUDA version — check with `nvcc --version`):
-
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cu121
-```
-
-**Verify GPU is visible:**
-
-```bash
-python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-```
-
----
-
-## Running the phases
-
-Each script is self-contained and run directly:
-
-```bash
-python scripts/phase00_load_model.py
-```
-
-Model weights are downloaded automatically from HuggingFace on first run (~1 GB for
-Qwen2.5-0.5B) and cached in the default HuggingFace cache (`~/.cache/huggingface/`).
+**Why truncate AR to layer 16?** The AR needs to output the raw residual stream at the probe layer. Truncating the base transformer to layers 0..16 and replacing the final norm with `nn.Identity()` makes `last_hidden_state` the exact quantity the forward hook captured — no further mapping needed.
