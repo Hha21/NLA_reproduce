@@ -20,7 +20,7 @@ echo "Started: $(date)" | tee -a "$LOG"
 
 python scripts/generate_summaries.py \
   --model "deepseek-v4-flash" \
-  --concurrency 50 \
+  --concurrency 1000 \
   2>&1 | tee -a "$LOG"
 
 echo "Finished: $(date)" | tee -a "$LOG"

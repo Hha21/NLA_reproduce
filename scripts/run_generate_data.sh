@@ -14,7 +14,7 @@ echo "Started: $(date)" | tee -a "$LOG"
 
 python scripts/generate_data.py \
   --n-samples 100000 \
-  --overwrite \
+  --overwite \
   2>&1 | tee -a "$LOG"
 
 echo "Finished: $(date)" | tee -a "$LOG"

@@ -26,7 +26,7 @@ from tqdm import tqdm
 from src.config import DEVICE, PROBE_LAYER
 
 _CORPUS           = ("HuggingFaceFW/fineweb", "sample-10BT")
-MIN_POSITION      = 64    # minimum tokens before the extraction point
+MIN_POSITION      = 150   # minimum tokens before the extraction point (~500 chars)
 POSITIONS_PER_DOC = 10    # extraction points sampled per document
 
 

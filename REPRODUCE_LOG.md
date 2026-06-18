@@ -38,6 +38,10 @@ We use the paper version as it is the one whose results (FVE 0.3-0.4) are report
 
 **API provider:** Paper uses Claude Opus 4.5. We use DeepSeek V4-Flash (~$4 per 100K vs. ~$75 for Claude Opus). Quality difference unknown; DeepSeek should follow the structured prompt well.
 
+**"Short paragraphs with bolded topic headings":** The paper's comment about this style refers to Claude's *raw output* before cleaning, not what gets stored. The reference `stage2_api_explain.py` strips bold markers, bullets, and numbering before writing to disk. Our implementation replicates this cleaning step. The paper notes this bold style "persists through NLA training" because the AV training data presumably retains Claude's raw formatting, causing the AV to learn it.
+
+**`<analysis>` is plain text, not a special token.** Both DeepSeek and Qwen tokenize `<analysis>` as ordinary sub-word tokens. Model-agnostic in principle; quality of features may differ from Claude Opus 4.5 in practice.
+
 ---
 
 ## Stage 2 — AR Warm-Start Training

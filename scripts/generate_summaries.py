@@ -1,10 +1,10 @@
 """
 Stage 2: generate linguistic-feature explanations for each text_truncated.
 
-Uses the NLA paper's analysis prompt (from the paper appendix, warmstart-data-
-generation section): asks the LLM to identify 4-5 features a language model
-would use to predict the next token at the truncation point. Responses are
-validated for <analysis>...</analysis> tags; malformed responses are retried.
+Uses the reference codebase prompt (stage2_api_explain.py): asks the LLM to
+identify 2-3 features a language model would use to predict the next token at
+the truncation point (~80-100 words). Responses are validated for
+<analysis>...</analysis> tags; malformed responses are retried.
 
 Adds a 'summary' column to the dataset (name kept for compatibility with
 --text-col summary in training scripts). Safe to interrupt and resume —
@@ -34,73 +34,38 @@ from tqdm.asyncio import tqdm as atqdm
 DATA_DIR   = Path("activations/dataset")
 CHECKPOINT = Path("activations/summaries_checkpoint.json")
 
-# Prompt from the NLA paper appendix (warmstart-data-generation section).
-# Asks for 4-5 features about what the LM is "thinking about" at the
-# truncation point — directly targeting the information x_l encodes.
-# NOTE: the reference GitHub repo (stage2_api_explain.py) uses a shorter
-# 2-3 feature version; the paper itself specifies 4-5 features / 150-200 words.
+# Prompt from the reference codebase (stage2_api_explain.py).
+# 2-3 features, ~80-100 words — the version actually used in the published experiments.
 _PROMPT = """\
 A language model needs to predict what text comes next after a snippet which \
-will be presented to you shortly. Identify the 4-5 most important features it \
+will be presented to you shortly. Identify the 2-3 most important features it \
 would use for this prediction.
 
 Focus on what the language model must be "thinking about" at the point where \
-the provided text ends. You should not need reference the fact that the text is \
-truncated/incomplete/a prefix: the language model is causal, so only sees the \
-prefix to what it predicts and this is implicit.
+the provided text ends. You should not need to reference the fact that the text \
+is truncated/incomplete/a prefix: the language model is causal, so only sees \
+the prefix to what it predicts and this is implicit.
 
-Order features by what is most important for predicting the next tokens.
-Each feature should consist of a ~5-15 word description. When describing \
-patterns, feel free to:
-
-Note when patterns repeat, mirror, or continue from earlier in the text
-Show how the same pattern manifests in multiple forms
-Use probabilistic language ("often", "typically", etc.) when the model faces \
-uncertainty
-Feel free to include specific - and relevant - textual examples inline.
-Track both what tokens are expected AND what contextual patterns determine \
-those expectations
+Order features by what is most important for predicting the next tokens. \
+Each feature should consist of a concise ~10-20 word description. Feel free \
+to include specific textual examples inline.
 
 Feature types to consider (as inspiration, not a rigid checklist):
+- Syntactic/structural constraints: "unclosed parenthesis requires matching close"
+- Immediate semantic expectations: "list promised three items but only two given"
+- Stylistic/register patterns: "formal academic tone maintained throughout"
+- Narrative/argumentative momentum: "thesis stated, supporting evidence now expected"
+- Domain/genre signals: "medical case history following SOAP format"
+- Repetition/continuation patterns: "same phrase structure repeating with variations"
 
-Syntactic/structural constraints: "unclosed parenthesis from line 3 requires \
-matching closing parenthesis before statement ends"
-Immediate semantic expectations: "list promised three items but only two given, \
-third item now required"
-Stylistic/register patterns: "formal academic tone maintained throughout using \
-passive voice and latinate vocabulary"
-Narrative/argumentative momentum: "thesis statement just completed, supporting \
-evidence or first counterargument now expected"
-Logical/causal dependencies: "causal premise about market conditions established, \
-economic consequence must now follow"
-Domain/genre signals: "medical case history following standard SOAP format, now \
-in Assessment section"
-Discourse/dialogue context: "speaker interrupted mid-sentence during heated \
-argument, continuation of same thought expected"
-Repetition/continuation patterns: "same prepositional phrase structure repeating \
-with variations like 'from a X perspective'"
-Distributional expectations: "verb ending in -ing typically followed by noun \
-phrase in this technical documentation style"
-Epistemic/meta-textual stance: "hedging language with 'may' and 'possibly' \
-showing continued uncertainty about empirical claims"
+The final feature must describe the very end of the presented sequence: its \
+role, what it's part of, and immediate constraints on what follows.
 
-Additionally:
-If the text contains H: and A: markers, these indicate dialogue turns between \
-a human and an assistant in a chat transcript.
-The final feature in your explanation must describe the very end of the \
-presented sequence: its role, what it's part of, what it implies, and how it \
-relates to patterns established earlier, as appropriate.
-Be specific and precise. Consider how the model tracks patterns across multiple \
-levels simultaneously-surface forms, semantic content, genre conventions, and \
-sequential dependencies. Features can describe both immediate next-token \
-constraints and longer-range structural expectations.
-
-Format (use up to 150-200 words total):
+Format — IMPORTANT: keep to ~80-100 words total and ALWAYS close the tag:
 <analysis>
-[first feature—include specific examples from text when relevant]
+[first feature — include specific examples when relevant]
 [second feature]
-...
-[final feature: analysis of last token, its role, and immediate constraints]
+[final feature: the last token, its role, immediate constraints]
 </analysis>
 
 Text to analyze:
@@ -133,25 +98,59 @@ def save_checkpoint():
     CHECKPOINT.write_text(json.dumps(checkpoint))
 
 
-def _valid(text: str) -> bool:
-    """Response must contain opening and closing analysis tags with content."""
-    return "<analysis>" in text and "</analysis>" in text
+import re as _re
+
+_LIST_PREFIX_RE = _re.compile(r"^\s*(?:[-*•+]|\d+[.)])\s+", _re.MULTILINE)
+_BOLD_RE        = _re.compile(r"\*\*(.+?)\*\*")
+_ANALYSIS_RE    = _re.compile(r"<analysis>(.*?)</analysis>", _re.DOTALL)
+
+
+def _extract_and_clean(raw: str) -> str | None:
+    """Mirror the reference _extract_and_clean():
+
+    1. Extract content inside <analysis>...</analysis> (tags are NOT stored).
+    2. Strip list-prefix markers (bullets, numbers).
+    3. Strip **bold** markers.
+    4. Strip stray * _ chars from line edges.
+    5. Drop empty lines; rejoin with double newline.
+
+    Returns None if tags are missing or fewer than 2 features remain.
+    """
+    m = _ANALYSIS_RE.search(raw)
+    if m is None:
+        return None
+    content = m.group(1)
+    cleaned = []
+    for line in content.split("\n"):
+        line = _LIST_PREFIX_RE.sub("", line)
+        line = _BOLD_RE.sub(r"\1 ", line)
+        line = line.strip().strip("*_")
+        if line:
+            cleaned.append(line)
+    if len(cleaned) < 2:
+        return None
+    return "\n\n".join(cleaned)
+
+
+MIN_TEXT_CHARS = 400  # skip texts too short for meaningful analysis
 
 
 async def summarise(sem: asyncio.Semaphore, idx: int, text: str) -> tuple[int, str | None]:
+    if len(text) < MIN_TEXT_CHARS:
+        return idx, None
     async with sem:
         for attempt in range(4):
             try:
                 resp = await client.chat.completions.create(
                     model=args.model,
                     messages=[{"role": "user", "content": _PROMPT.format(text=text)}],
-                    max_tokens=350,
                     temperature=0.3,
                 )
-                result = resp.choices[0].message.content.strip()
-                if _valid(result):
+                raw = resp.choices[0].message.content.strip()
+                result = _extract_and_clean(raw)
+                if result:
                     return idx, result
-                # Malformed (no closing tag) — retry without sleeping
+                # Malformed or too few features — retry without sleeping
             except APIStatusError as e:
                 if e.status_code == 429 or e.status_code >= 500:
                     await asyncio.sleep(2 ** attempt)
@@ -165,16 +164,23 @@ async def main():
 
     print(f"Loading dataset from {args.data_dir}...")
     ds = load_from_disk(args.data_dir)
-    n  = len(ds) if args.limit is None else min(args.limit, len(ds))
-    print(f"  {len(ds)} samples total, processing {n}")
+    print(f"  {len(ds)} samples total")
 
     if CHECKPOINT.exists():
         raw = json.loads(CHECKPOINT.read_text())
         checkpoint = {int(k): v for k, v in raw.items() if v and v.strip()}
         print(f"  Resuming — {len(checkpoint)} explanations already done")
 
-    todo = [i for i in range(n) if i not in checkpoint]
-    print(f"  {len(todo)} remaining\n")
+    # Build todo from ALL indices that pass the length filter and aren't done yet.
+    # --limit caps the number of items to process, not the index range scanned.
+    passable = [
+        i for i in range(len(ds))
+        if len(ds[i]["text_truncated"]) >= MIN_TEXT_CHARS and i not in checkpoint
+    ]
+    n_short = sum(1 for i in range(len(ds)) if len(ds[i]["text_truncated"]) < MIN_TEXT_CHARS)
+    todo = passable if args.limit is None else passable[:args.limit]
+    print(f"  {n_short} samples too short (< {MIN_TEXT_CHARS} chars), skipped")
+    print(f"  {len(todo)} to process\n")
 
     if todo:
         sem   = asyncio.Semaphore(args.concurrency)
@@ -198,13 +204,7 @@ async def main():
         save_checkpoint()
         print(f"\nCheckpoint saved to {CHECKPOINT}")
 
-    summaries = [checkpoint.get(i, "") for i in range(n)]
-
-    if n < len(ds):
-        existing = list(ds["summary"]) if "summary" in ds.column_names else [""] * len(ds)
-        for i, s in enumerate(summaries):
-            existing[i] = s
-        summaries = existing
+    summaries = [checkpoint.get(i, "") for i in range(len(ds))]
 
     if "summary" in ds.column_names:
         ds = ds.remove_columns(["summary"])
@@ -216,10 +216,12 @@ async def main():
     tmp.rename(args.data_dir)
     print(f"Saved dataset with 'summary' column to {args.data_dir}")
 
-    sample = ds[0]
-    print(f"\nExample:")
+    # Show a processed example (first entry in checkpoint, not necessarily ds[0])
+    ex_idx = int(next(iter(checkpoint))) if checkpoint else 0
+    sample = ds[ex_idx]
+    print(f"\nExample (idx={ex_idx}):")
     print(f"  text_truncated: {sample['text_truncated'][:120]}...")
-    print(f"  summary:        {sample['summary'][:200]}")
+    print(f"  summary:        {sample['summary'][:300]}")
 
 
 if __name__ == "__main__":
