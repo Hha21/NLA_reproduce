@@ -1,16 +1,13 @@
 """
-Phase 2 — train the Reconstructor (AR) on ground-truth text (oracle ceiling).
+Stage 2 — AR warm-start: supervised regression on (summary, activation) pairs.
 
-AR sees the original text_truncated — perfect information about what produced
-the activation. The FVE achieved here is the upper bound: all NLA results
-(where AR sees AV descriptions instead) must stay below this number.
+Trains the Activation Reconstructor to map text descriptions → activations.
+Uses the first half of the dataset (rows 0..n//2) so the second half remains
+unseen for AV SFT, matching the reference 50/50 data split.
 
 Usage:
-    # Quick smoke-test on a small dataset
-    python scripts/train_ar_baseline.py --n-epochs 2 --batch-size 8
-
-    # Full run
-    python scripts/train_ar_baseline.py
+    python scripts/train_ar_baseline.py --n-epochs 2 --batch-size 8   # smoke-test
+    python scripts/train_ar_baseline.py                                 # full run
 """
 import sys
 from pathlib import Path
@@ -31,18 +28,25 @@ CHECKPOINT = Path("checkpoints/ar_baseline.pt")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data-dir",      default="activations/dataset")
+parser.add_argument("--data-start",    type=int, default=0,
+                    help="First dataset row to use (default: 0)")
+parser.add_argument("--data-end",      type=int, default=None,
+                    help="Last dataset row (exclusive). Default: first half of dataset.")
 parser.add_argument("--n-epochs",      type=int,   default=5)
 parser.add_argument("--batch-size",    type=int,   default=16)
 parser.add_argument("--lr",            type=float, default=None,
-                    help="Head LR (default: 1e-5 with --unfreeze-base, 3e-4 head-only)")
+                    help="Head LR (default: 1e-4 with --unfreeze-base, 3e-4 head-only)")
 parser.add_argument("--base-lr",       type=float, default=None,
-                    help="Base LR when --unfreeze-base (default: lr/10). "
-                         "Ignored when freeze_base=True.")
+                    help="Base LR when --unfreeze-base (default: lr/10).")
 parser.add_argument("--unfreeze-base", action="store_true",
                     help="Fine-tune the full transformer, not just the linear head")
-parser.add_argument("--text-col",      default="text_truncated",
-                    help="Dataset column to use as AR input text "
-                         "(text_truncated for oracle, summary for warm-start)")
+parser.add_argument("--text-col",      default="summary",
+                    help="Dataset column for AR input text (summary for warm-start, "
+                         "text_truncated for oracle ceiling)")
+parser.add_argument("--mse-scale",     action="store_true", default=True,
+                    help="Normalise activation targets to L2 norm=sqrt(d_model) "
+                         "before MSE loss (matches reference mse_scale=sqrt_d_model)")
+parser.add_argument("--no-mse-scale",  dest="mse_scale", action="store_false")
 args = parser.parse_args()
 
 if args.lr is None:
@@ -53,11 +57,13 @@ if args.unfreeze_base and args.base_lr is None:
 # --- Dataset ---
 print("Loading dataset...")
 ds = load_from_disk(args.data_dir)
-print(f"  {len(ds)} samples")
+print(f"  {len(ds)} samples total")
+
+data_end = args.data_end if args.data_end is not None else len(ds) // 2
+ds = ds.select(range(args.data_start, data_end))
+print(f"  Using rows {args.data_start}..{data_end} ({len(ds)} samples)")
 
 # --- Mean baseline sanity check ---
-# Always predicting the corpus mean gives FVE = 0 by construction.
-# If this prints something far from 0.0, the FVE implementation is broken.
 acts_all  = torch.tensor(np.stack(ds["activation"]), dtype=torch.float32)
 mean_pred = acts_all.mean(0, keepdim=True).expand_as(acts_all)
 print(f"Mean baseline FVE: {fve(acts_all, mean_pred):.4f}  (expect ~0.0)")
@@ -70,6 +76,7 @@ ar  = load_ar(DEVICE, freeze_base=freeze)
 
 n_trainable = sum(p.numel() for p in ar.parameters() if p.requires_grad)
 print(f"Trainable parameters: {n_trainable:,}")
+print(f"mse_scale: {args.mse_scale}")
 
 # --- Train ---
 print()
@@ -80,11 +87,10 @@ ar = train_ar(
     lr         = args.lr,
     base_lr    = args.base_lr if not freeze else None,
     text_col   = args.text_col,
+    mse_scale  = args.mse_scale,
 )
 
 # --- Save ---
-# With freeze_base=True only the head changed, so we only need to save
-# the head weights. With --unfreeze-base we save the full state dict.
 CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
 if freeze:
     torch.save(ar.head.state_dict(), CHECKPOINT)

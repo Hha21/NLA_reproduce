@@ -10,3 +10,11 @@ DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
 # at layer PROBE_LAYER (the position of the final ">" of <summary>) is fed to the head.
 AR_PREFIX = "Summary of the following text: <text>"
 AR_SUFFIX = "</text> <summary>"
+
+# AV soft-token injection (reference: design.md).
+# ㊗ is a rare Unicode character used as a single-token placeholder; its embedding
+# is overwritten at forward time with the normalised activation vector.
+INJECT_TOKEN = "㊗"
+# Prompt: prefix is masked in the SFT loss; model generates text + AV_RESP_END.
+AV_PREFIX   = f"Explain: <concept>{INJECT_TOKEN}</concept>\n<explanation>"
+AV_RESP_END = "</explanation>"

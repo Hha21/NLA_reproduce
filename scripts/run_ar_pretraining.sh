@@ -14,10 +14,12 @@ echo "Started: $(date)" | tee -a "$LOG"
 
 python scripts/train_ar_baseline.py \
   --text-col summary \
-  --n-epochs 30 \
+  --n-epochs 15 \
   --batch-size 32 \
   --lr 1e-4 \
   --unfreeze-base \
+  --data-end 50000 \
+  --mse-scale \
   2>&1 | tee -a "$LOG"
 
 echo "Finished: $(date)" | tee -a "$LOG"
