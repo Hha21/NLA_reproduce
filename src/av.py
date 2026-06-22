@@ -6,9 +6,9 @@ Architecture (per reference design.md):
   - Injection: rare Unicode token ㊗ is reserved as a single-token placeholder.
     At forward time its embedding slot is overwritten with h_l normalised to
     L2 norm = sqrt(d_model)  (injection_scale = sqrt_d_model, reference default).
-  - Prompt (masked from loss): "Explain: <concept>㊗</concept>\n<explanation>"
-  - SFT target: "{text_truncated}</explanation>"
-    Uses the original text — not the LLM summary — for the strongest available signal.
+  - Prompt (masked from loss): chat-template user message with ㊗ inside <concept> tags
+  - SFT target: "<explanation>\\n{summary}\\n</explanation>"
+    Uses the LLM-generated explanation so AV and AR share the same description language.
 
 Data split: AV SFT trains on the second half of the dataset (rows n//2 .. n-1).
 The first half is reserved for AR SFT so the two warm-starts see disjoint examples.
@@ -58,6 +58,21 @@ class Verbalizer(nn.Module):
             inputs_embeds=embeds,
             attention_mask=attention_mask,
             labels=labels,
+        )
+
+    def generate(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        activation: torch.Tensor,
+        **gen_kwargs,
+    ) -> torch.Tensor:
+        """Inject activation and run autoregressive generation. Returns new token IDs."""
+        embeds = self._inject_activation(input_ids, activation)
+        return self.base.generate(
+            inputs_embeds=embeds,
+            attention_mask=attention_mask,
+            **gen_kwargs,
         )
 
 

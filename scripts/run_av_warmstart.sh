@@ -13,9 +13,9 @@ echo "Logging to $LOG"
 echo "Started: $(date)" | tee -a "$LOG"
 
 python scripts/train_warmstart.py \
-  --n-epochs 5 \
+  --n-epochs 10 \
   --batch-size 8 \
-  --lr 2e-5 \
+  --lr 5e-5 \
   --max-length 512 \
   2>&1 | tee -a "$LOG"
 

@@ -13,8 +13,8 @@ See [METHOD_PIPELINE.md](METHOD_PIPELINE.md) for a detailed walkthrough of every
 |---|---|---|---|
 | 0 | Activation extraction (FineWeb → dataset) | ✅ Complete | 100K (text, h_l) pairs |
 | 1 | LLM explanation generation | ✅ Complete | 83K summaries, DeepSeek V4-Flash |
-| 2 | AR warm-start training | ✅ Complete | val FVE ≈ 0.43 |
-| 3 | AV warm-start training | ⏳ Pending | — |
+| 2 | AR warm-start training | ✅ Complete | val FVE ≈ 0.47 (50K rows, mse_scale) |
+| 3 | AV warm-start training | 🔄 In progress | train_loss ~1.54, e2e FVE tracking added |
 | 4 | Joint GRPO training | ⏳ Pending | — |
 
 ---
@@ -43,6 +43,8 @@ export DEEPSEEK_API_KEY=sk-...
 ./scripts/run_generate_summaries.sh           # Stage 1: generate explanations
 
 ./scripts/run_ar_pretraining.sh               # Stage 2: AR warm-start
+
+./scripts/run_av_warmstart.sh                 # Stage 3: AV warm-start
 ```
 
 Model weights (~1 GB for Qwen2.5-0.5B) are downloaded automatically from HuggingFace on first run.
@@ -62,14 +64,15 @@ NLA_reproduce/
 │   ├── model.py                  #   load_target(), load_tokenizer()
 │   ├── data.py                   #   activation extraction, ActivationDataset
 │   ├── ar.py                     #   Reconstructor: text → â ∈ ℝ⁸⁹⁶
-│   ├── av.py                     #   Verbalizer: h_l → text description (stub)
-│   └── train.py                  #   train_ar(), fve() metric
+│   ├── av.py                     #   Verbalizer: h_l → text (㊗ injection, full 24-layer)
+│   └── train.py                  #   train_ar(), train_av(), eval_e2e_fve(), fve()
 ├── scripts/                      # entry points — run via shell scripts
 │   ├── phase00_load_model.py     #   verify GPU and model load
 │   ├── generate_data.py          #   Stage 0: build (text, activation) dataset
 │   ├── generate_summaries.py     #   Stage 1: LLM explanation generation
 │   ├── train_ar_baseline.py      #   Stage 2: AR warm-start
-│   ├── train_warmstart.py        #   Stage 3: AV warm-start (pending)
+│   ├── train_warmstart.py        #   Stage 3: AV warm-start
+│   ├── run_av_warmstart.sh       #   Stage 3 runner
 │   └── train_grpo.py             #   Stage 4: joint GRPO training (pending)
 ├── activations/                  # dataset and checkpoints — gitignored
 └── checkpoints/                  # saved model weights — gitignored

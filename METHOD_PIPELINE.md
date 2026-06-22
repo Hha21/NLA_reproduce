@@ -41,20 +41,22 @@ flowchart TD
 
     subgraph S2["Stage 2 — AR Warm-Start  ✓ complete"]
         direction TB
-        DS1 --> COL["ActivationDataset\n(summary, activation) pairs\n90 / 10 train / val split"]
+        DS1 --> COL["ActivationDataset\nrows 0..49 999 (first 50K)\n90 / 10 train / val split"]
         COL --> AR["Activation Reconstructor\nQwen2.5-0.5B layers 0..16\nfinal norm → Identity\nso last_hidden_state = raw h_l\n+ Linear(896→896, bias=False)\nidentity-initialised weight"]
         AR --> INP["Input prompt\nAR_PREFIX + summary + AR_SUFFIX\nlast-token hidden state → head → â"]
-        INP --> LOSS2["MSE loss  ‖â − h_l‖²"]
-        LOSS2 --> OPT2["AdamW · cosine schedule\nhead lr = 1e-4 · base lr = 1e-5\ngrad clip 1.0 · batch 32 · 30 epochs\n390 M trainable parameters"]
+        INP --> LOSS2["MSE loss on mse_scale-normalised targets\nnormalise h_l to ‖h_l‖₂ = √896 ≈ 29.93\nbefore computing ‖â − h_l‖²"]
+        LOSS2 --> OPT2["AdamW · cosine schedule\nhead lr = 1e-4 · base lr = 1e-5\ngrad clip 1.0 · batch 32 · 15 epochs\n390 M trainable parameters"]
         OPT2 --> AR
-        OPT2 --> CK2["checkpoints/ar_baseline.pt\nval FVE ≈ 0.43\n(paper target: 0.3–0.4)"]
+        OPT2 --> CK2["checkpoints/ar_baseline.pt\nval FVE ≈ 0.47\n(paper target: 0.3–0.4)"]
     end
 
-    subgraph S3["Stage 3 — AV Warm-Start  ⏳ pending"]
+    subgraph S3["Stage 3 — AV Warm-Start  🔄 in progress"]
         direction TB
-        CK2 --> AV["Activation Verbalizer\nQwen2.5-0.5B\nactivation h_l injected as soft token\nbefore the text prompt"]
-        AV --> SFT["SFT on (h_l → text_truncated)\nteaches AV to produce text\nthat describes the activation\nbefore RL reward signal exists"]
-        SFT --> CK3["checkpoints/av_warmstart.pt"]
+        CK2 --> AV["Activation Verbalizer\nQwen2.5-0.5B full (24 layers + LM head)\nrows 50 000..99 999 (second 50K)"]
+        AV --> INJ["Soft token injection\n㊗ placeholder in prompt\nembedding overwritten with h_l\nnormalised to ‖h_l‖₂ = √896"]
+        INJ --> AVLOSS["SFT on (h_l → summary)\nchat-template prompt + system message\ntarget: ＜explanation＞\\n{summary}\\n＜/explanation＞\ncross-entropy on response tokens only"]
+        AVLOSS --> E2E["End-to-end FVE after each epoch\nAV generates z (greedy, 100 val samples)\nAR reconstructs â from z\nFVE(â, h_l) logged alongside val_loss"]
+        E2E --> CK3["checkpoints/av_warmstart.pt"]
     end
 
     subgraph S4["Stage 4 — Joint GRPO Training  ⏳ pending"]
@@ -154,39 +156,116 @@ At initialisation, AR(z) = base(z)[:, -1, :] — i.e. the model just reads out i
 `AR_PREFIX + summary + AR_SUFFIX` = `"Summary of the following text: <text>{summary}</text> <summary>"`  
 The last-token hidden state at the position of the final `>` token is fed to the linear head.
 
+**Data split:**  
+Uses only the first 50K rows (rows 0..49999). The second 50K rows are reserved for AV SFT so the two warm-starts see disjoint examples — matching the reference 50/50 split (`av_sft_frac: 0.25 / ar_sft_frac: 0.25` in their config).
+
+**Activation normalisation (`mse_scale`):**  
+Before computing the MSE loss, each activation target is normalised to L2 norm = √d_model = √896 ≈ 29.93. This matches the reference `mse_scale = sqrt_d_model` config. The motivation is to keep regression targets at a stable scale regardless of raw activation magnitude, and to match the injection scale used by the AV (see Stage 3).
+
 **Training configuration:**
 
 | Hyperparameter | Value |
 |---|---|
 | Head LR | 1e-4 |
 | Base LR | 1e-5 (= head LR / 10) |
-| Schedule | Cosine annealing → 0 over 30 epochs |
+| Schedule | Cosine annealing → 0 over 15 epochs |
 | Gradient clipping | 1.0 |
 | Batch size | 32 |
-| Epochs | 30 |
+| Epochs | 15 |
+| Data rows | 0..49 999 (50K) |
 | val split | 10% |
-| Loss | MSE: ‖â − h_l‖² |
+| Loss | MSE on mse_scale-normalised targets |
 
-**Result:** val FVE ≈ 0.43 (paper reports 0.3–0.4 as warm-start target).
+**Result:** val FVE ≈ 0.47 (paper reports 0.3–0.4 as warm-start target). Converges by ~epoch 10; 15 epochs sufficient.
 
 **Diagnostic note on FVE:**  
-FVE = 1 − E[‖h_l − â‖²] / E[‖h_l − h̄_l‖²]. This is identical to R² from statistics — it measures the fraction of variance in the activations explained by the model's predictions. FVE = 0 means no better than predicting the corpus mean; FVE = 1 is perfect reconstruction.
+FVE = 1 − E[‖h_l − â‖²] / E[‖h_l − h̄_l‖²] = R² from statistics. FVE = 0 means no better than predicting the corpus mean; FVE = 1 is perfect reconstruction. Scale-invariant when both predictions and targets are normalised consistently.
 
 **Issues encountered:**
-- Early runs used plain text summaries (topic summaries, not linguistic analyses) → FVE ≈ 0.0007, model had nothing to learn from
-- LR of 2e-5 was too conservative; model barely moved over 10 epochs → raised to 1e-4
-- Missing gradient clipping with 390M unfrozen params → added `clip_grad_norm_(..., 1.0)`
+- Early runs used plain text summaries → FVE ≈ 0.0007
+- LR of 2e-5 was too conservative → raised to 1e-4
+- Missing gradient clipping → added `clip_grad_norm_(..., 1.0)`
+- Initially used all 100K rows; split to 50K after discovering reference uses a 50/50 disjoint split between AR and AV warm-starts
 
 ---
 
-## Stage 3 — AV Warm-Start (pending)
+## Stage 3 — AV Warm-Start
 
-**Script:** `scripts/train_warmstart.py`
+**Script:** `scripts/train_warmstart.py` · **Runner:** `scripts/run_av_warmstart.sh`
 
 **What it does:**  
-SFT the Activation Verbalizer on (h_l → `text_truncated`) pairs. The AV receives the activation as a soft token prepended to its input and learns to generate the original text that produced that activation. Without this warm-start, the AV produces random text and the GRPO reward signal is pure noise.
+SFT the Activation Verbalizer to generate, given h_l, the LLM-produced linguistic explanation for that activation. Using `summary` (not `text_truncated`) ensures AV and AR share the same description language: AR was trained to reconstruct h_l from summaries, so AV must learn to produce summaries in the same style.
 
-**AV architecture:** TBD — Qwen2.5-0.5B with a learned projection from h_l into the embedding space as a prefix token.
+**AV architecture:**
+- Base: full Qwen2.5-0.5B (all 24 layers + LM head), fully trainable
+- No truncation — AV is a standard text generator, not a vector encoder
+
+**Soft token injection (reference: `design.md` + `injection.py`):**  
+The prompt contains the rare Unicode character `㊗` as a placeholder. At forward time, the standard embedding lookup result at that position is overwritten with the normalised activation:
+
+```
+h_l_injected = h_l × (injection_scale / ‖h_l‖₂)
+injection_scale = √d_model = √896 ≈ 29.93
+```
+
+This scales h_l to the ambient residual-stream magnitude — the 75th-percentile activation norm measured over our dataset is 28.61, confirming `√d_model` is an accurate proxy (within 4.4%).
+
+**Prompt format (reference: `stage3_build.py` `_DEFAULT_ACTOR_TEMPLATE`):**  
+Single user message, no system message, wrapped via `tok.apply_chat_template`:
+
+```
+You are a meticulous AI researcher conducting an important investigation into
+activation vectors from a language model. Your overall task is to describe the
+semantic content of that activation vector.
+
+We will pass the vector enclosed in <concept> tags into your context. You must
+then produce an explanation for the vector, enclosed within <explanation> tags.
+The explanation consists of 2-3 text snippets describing that vector.
+
+Here is the vector:
+
+<concept>㊗</concept>
+
+Please provide an explanation.
+```
+
+**Target response (reference: `wrap_explanation()` in `schema.py`):**
+```
+<explanation>
+{summary}
+</explanation>
+```
+Cross-entropy loss is computed on the response tokens only; the prompt is masked with `-100`.
+
+**Data split:**  
+Uses rows 50000..99999 (second 50K) — disjoint from AR's first 50K.
+
+**End-to-end FVE evaluation:**  
+After each epoch, the frozen AR checkpoint is used to compute a joint quality signal:
+1. AV generates descriptions for 100 val samples (greedy decode, max 120 new tokens)
+2. Content inside `<explanation>` tags is extracted from each output
+3. AR reconstructs â from each description using the standard AR prompt
+4. FVE(â, h_l) is logged alongside val_loss
+
+This is the true metric of interest — it measures whether AV is producing descriptions the AR can decode, not just whether the cross-entropy loss is falling.
+
+**Training configuration:**
+
+| Hyperparameter | Value |
+|---|---|
+| LR | 5e-5 |
+| Schedule | Cosine annealing → 0 over 10 epochs |
+| Gradient clipping | 1.0 |
+| Batch size | 8 |
+| Max sequence length | 512 tokens |
+| Data rows | 50 000..99 999 (50K) |
+| val split | 10% |
+| Loss | Cross-entropy on response tokens |
+
+**Issues encountered:**
+- First run used `text_truncated` as target → severe overfitting (val_loss climbed while train_loss fell). Root cause: raw texts are long and highly varied; model memorised training texts rather than learning to condition on the activation signal
+- Second run used wrong prompt format (`"Explain: <concept>㊗</concept>"`) → inconsistent with reference and shorter than the actual system prompt the model should learn to respond to
+- Fixed both: target changed to `summary`, prompt updated to full paper system prompt via chat template
 
 ---
 
@@ -217,11 +296,11 @@ GRPO avoids a learned value function by using the within-group reward mean as a 
 export DEEPSEEK_API_KEY=sk-...
 ./scripts/run_generate_summaries.sh
 
-# Stage 2: AR warm-start
+# Stage 2: AR warm-start (first 50K rows, mse_scale)
 ./scripts/run_ar_pretraining.sh
 
-# Stage 3: AV warm-start (pending implementation)
-# python scripts/train_warmstart.py
+# Stage 3: AV warm-start (second 50K rows, e2e FVE tracked)
+./scripts/run_av_warmstart.sh
 
 # Stage 4: joint GRPO (pending implementation)
 # python scripts/train_grpo.py
@@ -238,4 +317,6 @@ export DEEPSEEK_API_KEY=sk-...
 | 3 | Dataset scale | ~1M vectors | 100K | Validate pipeline before scaling |
 | 4 | Explanation model | Claude Opus 4.5 | DeepSeek V4-Flash | Cost (~$4 vs ~$75 per 100K) |
 | 5 | Explanation prompt | 4–5 features, 150–200 words | 2–3 features, 80–100 words | Reference codebase version used |
-| 6 | AR warm-start FVE | 0.3–0.4 | ~0.43 | Slightly exceeds paper target |
+| 6 | AR warm-start FVE | 0.3–0.4 | ~0.47 | Slightly exceeds paper target |
+| 7 | AR/AV data split | 50/50 disjoint | 50/50 disjoint ✓ | First 50K → AR, second 50K → AV |
+| 8 | Activation norm target | sqrt_d_model | sqrt_d_model ✓ | Empirical 75th pct = 28.61, sqrt(896) = 29.93 |
