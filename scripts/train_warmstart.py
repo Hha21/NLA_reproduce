@@ -80,17 +80,14 @@ if not args.no_fve:
 print()
 av = train_av(
     av, ds, tok, DEVICE,
-    n_epochs   = args.n_epochs,
-    batch_size = args.batch_size,
-    lr         = args.lr,
-    max_length = args.max_length,
-    text_col   = "summary",
-    ar         = ar,
+    n_epochs        = args.n_epochs,
+    batch_size      = args.batch_size,
+    lr              = args.lr,
+    max_length      = args.max_length,
+    text_col        = "summary",
+    ar              = ar,
+    checkpoint_path = str(CHECKPOINT),
 )
-
-# --- Save ---
-CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
-torch.save(av.state_dict(), CHECKPOINT)
-print(f"\nSaved AV checkpoint to {CHECKPOINT}")
+print(f"\nBest val_loss checkpoint saved to {CHECKPOINT}")
 
 os._exit(0)

@@ -9,6 +9,7 @@ Training loops and metrics.
 import math
 import re
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -253,20 +254,22 @@ def train_av(
     dataset,
     tok,
     device: str,
-    n_epochs: int   = 5,
-    batch_size: int = 8,
-    lr: float       = 2e-5,
-    max_length: int = 512,
-    val_frac: float = 0.1,
-    text_col: str   = "summary",
-    ar              = None,   # optional frozen AR for end-to-end FVE after each epoch
-    n_fve_eval: int = 100,    # val samples used for e2e FVE (kept small for speed)
+    n_epochs: int    = 5,
+    batch_size: int  = 8,
+    lr: float        = 2e-5,
+    max_length: int  = 512,
+    val_frac: float  = 0.1,
+    text_col: str    = "summary",
+    ar               = None,    # optional frozen AR for end-to-end FVE after each epoch
+    n_fve_eval: int  = 100,     # val samples used for e2e FVE (kept small for speed)
+    checkpoint_path: str = None, # if set, saves best val_loss checkpoint here
 ):
     """
     SFT warm-start for the Verbalizer: (h_l → summary) pairs.
 
     If ar is provided (frozen AR checkpoint), computes end-to-end FVE after each
     epoch by generating descriptions with AV and reconstructing with AR.
+    If checkpoint_path is set, saves the best val_loss checkpoint during training.
     """
     n_val   = max(1, int(len(dataset) * val_frac))
     n_train = len(dataset) - n_val
@@ -288,6 +291,8 @@ def train_av(
 
     opt       = torch.optim.AdamW(av.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=n_epochs)
+
+    best_val_loss = float("inf")
 
     for epoch in range(n_epochs):
         av.train()
@@ -311,16 +316,23 @@ def train_av(
                 out = av(input_ids, attn_mask, acts, labels=labels)
                 val_loss += out.loss.item()
 
-        current_lr = scheduler.get_last_lr()[0]
+        val_loss_avg = val_loss / len(val_loader)
+        current_lr   = scheduler.get_last_lr()[0]
         log = (f"Epoch {epoch + 1}/{n_epochs}  "
                f"train_loss: {total_loss / len(train_loader):.4f}  "
-               f"val_loss: {val_loss / len(val_loader):.4f}  "
+               f"val_loss: {val_loss_avg:.4f}  "
                f"lr: {current_lr:.2e}")
 
         if ar is not None:
             e2e = eval_e2e_fve(av, ar, val_acts_fve, tok, device, n_eval=n_fve)
             log += f"  e2e FVE: {e2e:.4f}"
             av.train()   # restore training mode after eval_e2e_fve sets eval
+
+        if checkpoint_path is not None and val_loss_avg < best_val_loss:
+            best_val_loss = val_loss_avg
+            Path(checkpoint_path).parent.mkdir(parents=True, exist_ok=True)
+            torch.save(av.state_dict(), checkpoint_path)
+            log += "  [best]"
 
         print(log)
 

@@ -97,10 +97,20 @@ First implementation used a simplified placeholder `"Explain: <concept>㊗</conc
 ### Issue #14 — `apply_chat_template` with `return_tensors="pt"` returns tokenizers.Encoding
 `tok.apply_chat_template(..., tokenize=True, return_tensors="pt")` returned a `tokenizers.Encoding` object instead of a plain tensor with this tokenizer version. Fix: use `tokenize=False` to get the string, then call `tok(prompt_str, ...)["input_ids"]` separately.
 
+### Issue #15 — AV overfitting: too many epochs, dataset too small
+Reference (`actor_sft.sh`) trains for `NUM_EPOCH=1` on 250k AV samples. We trained for 10 epochs on 50k — 50x more gradient steps per parameter. val_loss peaked at epoch 1 (1.55) then diverged to 2.28 by epoch 9; e2e FVE peaked at epoch 1 (0.44) but no best-checkpoint was saved.
+
+Fix:
+- Added `checkpoint_path` parameter to `train_av()` — saves best val_loss model during training rather than the final epoch
+- Reduced epochs to 3 in `run_av_warmstart.sh` (3 × 50k ≈ reference 1 × 250k in total gradient steps)
+- LR reduced to 2e-5 (matching reference) from 5e-5
+
+Note on UltraFineWeb: reference `qwen7b_ultrafineweb_100k.yaml` explicitly warns the 1B-token Ultra-FineWeb subset is no longer on HuggingFace; recommends FineWeb sample-10BT for fresh reproduction.
+
 ---
 
 ## Pending
 
-- [ ] Complete AV warm-start training — monitor e2e FVE, target >0.2
+- [ ] Re-run AV warm-start (3 epochs, lr=2e-5, best-checkpoint saving)
 - [ ] Implement GRPO training loop (`scripts/train_grpo.py`)
-- [ ] Consider scaling dataset to 1M vectors after validating end-to-end
+- [ ] Scale dataset: extract 400k more FineWeb activations + generate summaries to reach ~250k AV samples (matching reference scale, ~$16 DeepSeek cost)
