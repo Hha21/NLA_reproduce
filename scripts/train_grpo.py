@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import argparse
 import numpy as np
 import torch
-from datasets import load_from_disk
+from datasets import load_from_disk, concatenate_datasets
 
 from src.config import DEVICE
 from src.av import load_av
@@ -55,8 +55,25 @@ parser.add_argument("--no-kl",         action="store_true",
 args = parser.parse_args()
 
 # --- Dataset (use full 100k; RL learns from reward not labels, overlap is OK) ---
+def _load_dataset(data_dir: str):
+    """Load dataset from data_dir, falling back to shards if final not yet written."""
+    from pathlib import Path
+    p = Path(data_dir)
+    if (p / "dataset_info.json").exists():
+        return load_from_disk(str(p))
+    shards_dir = p / "shards"
+    if shards_dir.exists():
+        shard_paths = sorted(
+            s for s in shards_dir.glob("shard_*")
+            if (s / "dataset_info.json").exists()
+        )
+        if shard_paths:
+            print(f"  NOTE: final dataset not found — loading {len(shard_paths)} shards from {shards_dir}")
+            return concatenate_datasets([load_from_disk(str(s)) for s in shard_paths])
+    raise FileNotFoundError(f"No dataset or shards found at {data_dir!r}")
+
 print("Loading dataset...")
-ds = load_from_disk(args.data_dir)
+ds = _load_dataset(args.data_dir)
 print(f"  {len(ds)} samples")
 
 # Fixed val set for e2e FVE at checkpoints (200 samples, drawn from the end of the dataset)

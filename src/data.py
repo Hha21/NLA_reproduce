@@ -63,7 +63,11 @@ def build_dataset(
     n_samples: int          = 5_000,
     min_position: int       = MIN_POSITION,
     positions_per_doc: int  = POSITIONS_PER_DOC,
+    max_position: int       = 0,       # cap extraction point (tokens); 0 = no cap
     seed: int               = 42,
+    shard_size: int         = 0,       # call on_shard every N samples; 0 = disabled
+    on_shard                = None,    # callback(shard_index: int, Dataset)
+    skip_n: int             = 0,       # replay-skip first N samples (for resume)
 ) -> Dataset:
     """
     Stream FineWeb sample-10BT, extract up to positions_per_doc activations
@@ -71,6 +75,13 @@ def build_dataset(
 
       text_truncated  str        — text the model saw up to extraction point
       activation      float32[]  — residual-stream vector, shape (hidden_size,)
+
+    When shard_size > 0, on_shard(idx, ds) is called each time shard_size new
+    samples are collected. The returned Dataset contains only the final partial
+    shard (may be empty if n_samples is an exact multiple of shard_size).
+
+    When skip_n > 0, the first skip_n positions are counted (rng replayed)
+    without running the GPU — use this to resume after completed shards.
     """
     rng    = np.random.default_rng(seed)
     corpus = load_dataset(*_CORPUS, split="train", streaming=True)
@@ -78,8 +89,15 @@ def build_dataset(
     extract, handle = make_extractor(target)
     rows = {"text_truncated": [], "activation": []}
 
-    with tqdm(total=n_samples, desc="Extracting activations") as pbar:
+    n_skipped = 0
+    n_new     = 0
+    n_need    = n_samples - skip_n
+    shard_idx = (skip_n // shard_size) if shard_size else 0
+
+    with tqdm(total=n_samples, initial=skip_n, desc="Extracting activations") as pbar:
         for doc in corpus:
+            if n_new >= n_need:
+                break
             text = doc["text"].strip()
             if not text:
                 continue
@@ -99,19 +117,31 @@ def build_dataset(
             offsets = rng.choice(n_valid, size=n_pos, replace=False)
             positions = sorted(min_position + offsets)
 
+            # Cap to max_position to avoid OOM on very long documents.
+            if max_position > 0:
+                positions = [p for p in positions if p <= max_position]
+
             for pos in positions:
-                trunc_ids  = ids[: pos + 1].to(DEVICE)
-                trunc_text = tok.decode(trunc_ids.cpu(), skip_special_tokens=True)
-
-                rows["text_truncated"].append(trunc_text)
-                rows["activation"].append(extract(trunc_ids))
-
-                pbar.update(1)
-                if len(rows["text_truncated"]) >= n_samples:
+                if n_new >= n_need:
                     break
 
-            if len(rows["text_truncated"]) >= n_samples:
-                break
+                # Fast-forward: replay rng without touching the GPU.
+                if n_skipped < skip_n:
+                    n_skipped += 1
+                    continue
+
+                trunc_ids  = ids[:pos + 1].to(DEVICE)
+                trunc_text = tok.decode(trunc_ids.cpu(), skip_special_tokens=True)
+                rows["text_truncated"].append(trunc_text)
+                rows["activation"].append(extract(trunc_ids))
+                n_new += 1
+                pbar.update(1)
+
+                if shard_size and len(rows["text_truncated"]) >= shard_size:
+                    if on_shard is not None:
+                        on_shard(shard_idx, Dataset.from_dict(rows))
+                    rows = {"text_truncated": [], "activation": []}
+                    shard_idx += 1
 
     handle.remove()
     return Dataset.from_dict(rows)
