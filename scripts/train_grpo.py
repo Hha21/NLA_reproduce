@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import argparse
+import numpy as np
 import torch
 from datasets import load_from_disk
 
@@ -43,6 +44,9 @@ parser.add_argument("--av-lr",          type=float, default=1.41e-5)
 parser.add_argument("--ar-lr",          type=float, default=1.41e-5)
 parser.add_argument("--kl-coef",        type=float, default=0.01)
 parser.add_argument("--max-new-tokens", type=int,   default=150)
+parser.add_argument("--rollout-batch",  type=int,   default=4,
+                    help="Activations batched per av.generate() call. "
+                         "Higher = faster rollout; reduce if OOM during generation.")
 parser.add_argument("--save-interval",  type=int,   default=100)
 parser.add_argument("--log-interval",   type=int,   default=10)
 parser.add_argument("--no-kl",         action="store_true",
@@ -54,6 +58,14 @@ args = parser.parse_args()
 print("Loading dataset...")
 ds = load_from_disk(args.data_dir)
 print(f"  {len(ds)} samples")
+
+# Fixed val set for e2e FVE at checkpoints (200 samples, drawn from the end of the dataset)
+N_VAL = 200
+val_acts = torch.tensor(
+    np.stack(ds.select(range(len(ds) - N_VAL, len(ds)))["activation"]),
+    dtype=torch.float32,
+)
+print(f"  Val set: {N_VAL} samples for e2e FVE at each checkpoint")
 
 # --- AV ---
 print("\nLoading AV...")
@@ -106,9 +118,11 @@ train_grpo(
     ar_lr           = args.ar_lr,
     kl_coef         = 0.0 if args.no_kl else args.kl_coef,
     max_new_tokens  = args.max_new_tokens,
+    rollout_batch   = args.rollout_batch,
     checkpoint_path = str(GRPO_BASE),
     save_interval   = args.save_interval,
     log_interval    = args.log_interval,
+    val_acts        = val_acts,
 )
 
 sys.stdout.flush()

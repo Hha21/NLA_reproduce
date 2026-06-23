@@ -346,64 +346,79 @@ def train_av(
 FAILED_REWARD = -2.0  # penalty for sequences that produce no valid <explanation> tag
 
 
-def _grpo_rollout(av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device):
+def _grpo_rollout(av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device,
+                  rollout_batch=4, step=None, n_steps=None):
     """
-    One rollout: for each of N activations generate K descriptions with AV (temp=1),
-    then score each with AR. Returns three parallel lists of length N, each containing
-    a list of length K.
+    One rollout: generate K descriptions for each of N activations with AV (temp=1),
+    score with AR. Returns three parallel lists of length N, each containing K entries.
+
+    rollout_batch activations are generated together in one av.generate() call,
+    reducing Python overhead and improving GPU utilisation vs. one activation at a time.
     """
-    N = acts.shape[0]
-    K = n_samples
+    N   = acts.shape[0]
+    K   = n_samples
     T_p = len(prompt_ids)
+    D   = acts.shape[1]
     all_gen, all_desc, all_rew = [], [], []
 
-    for i in range(N):
-        act_i = acts[i]
-        prompt_K = prompt_ids.unsqueeze(0).expand(K, -1)       # (K, T_p)
-        mask_K   = torch.ones(K, T_p, dtype=torch.long, device=device)
-        act_K    = act_i.unsqueeze(0).expand(K, -1)            # (K, d)
+    n_batches = math.ceil(N / rollout_batch)
+    step_tag  = f"step {step}/{n_steps} " if step is not None else ""
+
+    for bi in tqdm(range(n_batches), desc=f"{step_tag}rollout", leave=False):
+        acts_b = acts[bi * rollout_batch : (bi + 1) * rollout_batch]  # (Nb, D)
+        Nb     = acts_b.shape[0]
+
+        # Build (Nb*K, T_p) prompt and (Nb*K, D) activations:
+        # rows [i*K : (i+1)*K] all use activation i.
+        prompt_BK = prompt_ids.unsqueeze(0).expand(Nb * K, -1)               # (Nb*K, T_p)
+        mask_BK   = torch.ones(Nb * K, T_p, dtype=torch.long, device=device)
+        act_BK    = acts_b.unsqueeze(1).expand(-1, K, -1).reshape(Nb * K, D) # (Nb*K, D)
 
         with torch.no_grad():
-            gen = av.generate(
-                prompt_K, mask_K, act_K,
+            gen_BK = av.generate(
+                prompt_BK, mask_BK, act_BK,
                 max_new_tokens=max_new_tokens,
                 do_sample=True, temperature=1.0,
                 pad_token_id=tok.eos_token_id,
-            )  # (K, T_new) — generated tokens only
+            )  # (Nb*K, T_new)
 
-        # Trim each sequence to include first EOS and strip pad EOS tokens after it
-        gen_list = []
-        for k in range(K):
-            ids = gen[k]
-            eos_pos = (ids == tok.eos_token_id).nonzero(as_tuple=True)[0]
-            end = eos_pos[0].item() + 1 if len(eos_pos) > 0 else len(ids)
-            gen_list.append(ids[:end])
+        for i in range(Nb):
+            act_i     = acts_b[i]
+            gen_slice = gen_BK[i * K : (i + 1) * K]   # (K, T_new)
 
-        # Extract descriptions from generated text
-        descriptions = []
-        for ids in gen_list:
-            text = tok.decode(ids, skip_special_tokens=True)
-            m = re.search(r"<explanation>(.*?)(?:</explanation>|$)", text, re.DOTALL)
-            descriptions.append(m.group(1).strip() if m else None)
+            # Trim each sequence at first EOS
+            gen_list = []
+            for k in range(K):
+                ids     = gen_slice[k]
+                eos_pos = (ids == tok.eos_token_id).nonzero(as_tuple=True)[0]
+                end     = eos_pos[0].item() + 1 if len(eos_pos) > 0 else len(ids)
+                gen_list.append(ids[:end])
 
-        # Score valid descriptions with AR: reward = -MSE(norm(â), norm(h_l))
-        valid_ks = [k for k, d in enumerate(descriptions) if d is not None]
-        rewards  = [FAILED_REWARD] * K
+            # Extract descriptions
+            descriptions = []
+            for ids in gen_list:
+                text = tok.decode(ids, skip_special_tokens=True)
+                m    = re.search(r"<explanation>(.*?)(?:</explanation>|$)", text, re.DOTALL)
+                descriptions.append(m.group(1).strip() if m else None)
 
-        if valid_ks:
-            texts   = [f"{AR_PREFIX}{descriptions[k]}{AR_SUFFIX}" for k in valid_ks]
-            enc     = tok(texts, return_tensors="pt", padding=True,
-                          truncation=True, max_length=ar_max_length).to(device)
-            act_rep = act_i.unsqueeze(0).expand(len(valid_ks), -1)
-            with torch.no_grad():
-                a_hat = ar(enc["input_ids"], enc["attention_mask"]).float()
-            mse = ((a_hat - _normalize_to_sqrt_d(act_rep)) ** 2).mean(dim=-1)
-            for j, k in enumerate(valid_ks):
-                rewards[k] = -mse[j].item()
+            # Score valid descriptions: reward = -MSE(norm(â), norm(h_l))
+            valid_ks = [k for k, d in enumerate(descriptions) if d is not None]
+            rewards  = [FAILED_REWARD] * K
 
-        all_gen.append(gen_list)
-        all_desc.append(descriptions)
-        all_rew.append(rewards)
+            if valid_ks:
+                texts   = [f"{AR_PREFIX}{descriptions[k]}{AR_SUFFIX}" for k in valid_ks]
+                enc     = tok(texts, return_tensors="pt", padding=True,
+                              truncation=True, max_length=ar_max_length).to(device)
+                act_rep = act_i.unsqueeze(0).expand(len(valid_ks), -1)
+                with torch.no_grad():
+                    a_hat = ar(enc["input_ids"], enc["attention_mask"]).float()
+                mse = ((a_hat - _normalize_to_sqrt_d(act_rep)) ** 2).mean(dim=-1)
+                for j, k in enumerate(valid_ks):
+                    rewards[k] = -mse[j].item()
+
+            all_gen.append(gen_list)
+            all_desc.append(descriptions)
+            all_rew.append(rewards)
 
     return all_gen, all_desc, all_rew
 
@@ -465,9 +480,11 @@ def train_grpo(
     kl_coef: float      = 0.01,      # reference rl.sh line 54
     max_new_tokens: int = 150,       # reference rl.sh line 108
     ar_max_length: int  = 256,
-    checkpoint_path: str = None,     # base path; saves av+ar every save_interval steps
-    save_interval: int   = 100,
-    log_interval: int    = 10,
+    rollout_batch: int           = 4,     # activations batched per generate() call (speedup)
+    checkpoint_path: str         = None,  # base path; saves av+ar every save_interval steps
+    save_interval: int           = 100,
+    log_interval: int            = 10,
+    val_acts: torch.Tensor       = None,  # if set, eval e2e FVE at each checkpoint save
 ):
     """
     Joint AV GRPO + AR supervised MSE training.
@@ -480,7 +497,8 @@ def train_grpo(
       5. AR loss: MSE(norm(AR(desc)), norm(h_l)) on all valid descriptions.
       6. Joint backward + constant-LR optimizer step (matches reference rl.sh).
 
-    av_ref: frozen SFT checkpoint of AV used for the KL penalty (pass None to disable KL).
+    av_ref:   frozen SFT AV for KL penalty (pass None to disable KL).
+    val_acts: pre-loaded tensor of val activations for e2e FVE at each checkpoint.
     AR is updated alongside AV — live reward model, not frozen (per reference design).
     """
     av_opt = torch.optim.AdamW(av.parameters(), lr=av_lr, weight_decay=0.0)
@@ -519,7 +537,8 @@ def train_grpo(
         av.eval()
         ar.eval()
         all_gen, all_desc, all_rew = _grpo_rollout(
-            av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device
+            av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device,
+            rollout_batch=rollout_batch, step=step, n_steps=n_steps,
         )
 
         # ── GRPO advantages ──────────────────────────────────────────────────
@@ -576,7 +595,7 @@ def train_grpo(
         av_opt.step()
         ar_opt.step()
 
-        if step % log_interval == 0:
+        if step % log_interval == 0 or step == 1:
             mean_r = np.mean([r for g in all_rew for r in g])
             print(f"Step {step:4d}/{n_steps}  "
                   f"pg: {pg_total/n_prompts:+.4f}  "
@@ -585,11 +604,17 @@ def train_grpo(
                   f"reward: {mean_r:.4f}  "
                   f"valid: {n_valid}/{n_prompts * n_samples}")
 
-        if checkpoint_path is not None and step % save_interval == 0:
+        if checkpoint_path is not None and (step % save_interval == 0 or step == n_steps):
             parent = Path(checkpoint_path).parent
             stem   = Path(checkpoint_path).stem
             torch.save(av.state_dict(), parent / f"{stem}_av_step{step}.pt")
             torch.save(ar.state_dict(), parent / f"{stem}_ar_step{step}.pt")
-            print(f"  → checkpoints saved at step {step}")
+            ckpt_msg = f"  → step {step}: checkpoints saved"
+            if val_acts is not None:
+                e2e = eval_e2e_fve(av, ar, val_acts, tok, device, n_eval=len(val_acts))
+                ckpt_msg += f"  e2e FVE: {e2e:.4f}"
+                av.train()
+                ar.train()
+            print(ckpt_msg)
 
     return av, ar

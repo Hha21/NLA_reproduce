@@ -20,14 +20,18 @@ from src.config import DEVICE
 from src.data import POSITIONS_PER_DOC, build_dataset
 from src.model import load_target, load_tokenizer
 
-OUT_DIR = Path("activations/dataset")
+DEFAULT_OUT_DIR = Path("activations/dataset")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--n-samples",         type=int, default=5_000)
 parser.add_argument("--positions-per-doc", type=int, default=POSITIONS_PER_DOC,
                     help="Extraction points sampled per document (default: %(default)s)")
+parser.add_argument("--out-dir",           default=str(DEFAULT_OUT_DIR),
+                    help="Output directory for the dataset (default: %(default)s)")
 parser.add_argument("--overwrite",         action="store_true")
 args = parser.parse_args()
+
+OUT_DIR = Path(args.out_dir)
 
 if OUT_DIR.exists() and not args.overwrite:
     print(f"Dataset already exists at {OUT_DIR}. Pass --overwrite to regenerate.")
