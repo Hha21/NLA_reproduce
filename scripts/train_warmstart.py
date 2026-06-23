@@ -90,4 +90,5 @@ av = train_av(
 )
 print(f"\nBest val_loss checkpoint saved to {CHECKPOINT}")
 
+sys.stdout.flush()
 os._exit(0)

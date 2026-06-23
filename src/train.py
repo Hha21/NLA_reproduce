@@ -337,3 +337,259 @@ def train_av(
         print(log)
 
     return av
+
+
+# ---------------------------------------------------------------------------
+# GRPO joint training: AV (policy gradient) + AR (supervised MSE)
+# ---------------------------------------------------------------------------
+
+FAILED_REWARD = -2.0  # penalty for sequences that produce no valid <explanation> tag
+
+
+def _grpo_rollout(av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device):
+    """
+    One rollout: for each of N activations generate K descriptions with AV (temp=1),
+    then score each with AR. Returns three parallel lists of length N, each containing
+    a list of length K.
+    """
+    N = acts.shape[0]
+    K = n_samples
+    T_p = len(prompt_ids)
+    all_gen, all_desc, all_rew = [], [], []
+
+    for i in range(N):
+        act_i = acts[i]
+        prompt_K = prompt_ids.unsqueeze(0).expand(K, -1)       # (K, T_p)
+        mask_K   = torch.ones(K, T_p, dtype=torch.long, device=device)
+        act_K    = act_i.unsqueeze(0).expand(K, -1)            # (K, d)
+
+        with torch.no_grad():
+            gen = av.generate(
+                prompt_K, mask_K, act_K,
+                max_new_tokens=max_new_tokens,
+                do_sample=True, temperature=1.0,
+                pad_token_id=tok.eos_token_id,
+            )  # (K, T_new) — generated tokens only
+
+        # Trim each sequence to include first EOS and strip pad EOS tokens after it
+        gen_list = []
+        for k in range(K):
+            ids = gen[k]
+            eos_pos = (ids == tok.eos_token_id).nonzero(as_tuple=True)[0]
+            end = eos_pos[0].item() + 1 if len(eos_pos) > 0 else len(ids)
+            gen_list.append(ids[:end])
+
+        # Extract descriptions from generated text
+        descriptions = []
+        for ids in gen_list:
+            text = tok.decode(ids, skip_special_tokens=True)
+            m = re.search(r"<explanation>(.*?)(?:</explanation>|$)", text, re.DOTALL)
+            descriptions.append(m.group(1).strip() if m else None)
+
+        # Score valid descriptions with AR: reward = -MSE(norm(â), norm(h_l))
+        valid_ks = [k for k, d in enumerate(descriptions) if d is not None]
+        rewards  = [FAILED_REWARD] * K
+
+        if valid_ks:
+            texts   = [f"{AR_PREFIX}{descriptions[k]}{AR_SUFFIX}" for k in valid_ks]
+            enc     = tok(texts, return_tensors="pt", padding=True,
+                          truncation=True, max_length=ar_max_length).to(device)
+            act_rep = act_i.unsqueeze(0).expand(len(valid_ks), -1)
+            with torch.no_grad():
+                a_hat = ar(enc["input_ids"], enc["attention_mask"]).float()
+            mse = ((a_hat - _normalize_to_sqrt_d(act_rep)) ** 2).mean(dim=-1)
+            for j, k in enumerate(valid_ks):
+                rewards[k] = -mse[j].item()
+
+        all_gen.append(gen_list)
+        all_desc.append(descriptions)
+        all_rew.append(rewards)
+
+    return all_gen, all_desc, all_rew
+
+
+def _seq_log_probs(av, prompt_ids, gen_list, acts, tok, device, no_grad=False):
+    """
+    Compute mean per-token log prob for each generated sequence under av.
+
+    prompt_ids : (T_p,)
+    gen_list   : list of K tensors (variable-length generated token IDs)
+    acts       : (K, d) activations
+    Returns    : (K,) tensor — gradient-connected to av when no_grad=False
+    """
+    from contextlib import nullcontext
+
+    K    = len(gen_list)
+    T_p  = len(prompt_ids)
+    lens = [len(g) for g in gen_list]
+    maxg = max(lens)
+    pad  = tok.eos_token_id
+
+    full_ids   = torch.full((K, T_p + maxg), pad, dtype=torch.long, device=device)
+    attn       = torch.zeros(K, T_p + maxg,       dtype=torch.long, device=device)
+    gen_padded = torch.full((K, maxg),       pad, dtype=torch.long, device=device)
+    resp_mask  = torch.zeros(K, maxg,              device=device)
+
+    for k in range(K):
+        full_ids[k, :T_p]               = prompt_ids
+        full_ids[k, T_p:T_p + lens[k]]  = gen_list[k]
+        attn[k, :T_p + lens[k]]         = 1
+        gen_padded[k, :lens[k]]          = gen_list[k]
+        resp_mask[k, :lens[k]]           = 1.0
+
+    ctx = torch.no_grad() if no_grad else nullcontext()
+    with ctx:
+        logits = av(full_ids, attn, acts, labels=None).logits  # (K, T_p+maxg, V)
+
+    # logits[:,t] predicts position t+1; generated tokens start at position T_p
+    resp_logits = logits[:, T_p - 1:T_p + maxg - 1, :]        # (K, maxg, V)
+    log_probs   = torch.log_softmax(resp_logits, dim=-1)
+    token_lp    = log_probs.gather(2, gen_padded.unsqueeze(2)).squeeze(2)  # (K, maxg)
+    token_lp    = token_lp * resp_mask
+    seq_lp      = token_lp.sum(1) / resp_mask.sum(1).clamp(min=1.0)       # (K,)
+    return seq_lp
+
+
+def train_grpo(
+    av,
+    av_ref,
+    ar,
+    dataset,
+    tok,
+    device: str,
+    n_steps: int        = 500,
+    n_prompts: int      = 16,        # N: activations per rollout (reference: 128 on 8 GPUs)
+    n_samples: int      = 8,         # K: descriptions per activation (GRPO group size)
+    av_lr: float        = 1.41e-5,   # reference rl.sh line 126
+    ar_lr: float        = 1.41e-5,   # reference rl.sh line 102
+    kl_coef: float      = 0.01,      # reference rl.sh line 54
+    max_new_tokens: int = 150,       # reference rl.sh line 108
+    ar_max_length: int  = 256,
+    checkpoint_path: str = None,     # base path; saves av+ar every save_interval steps
+    save_interval: int   = 100,
+    log_interval: int    = 10,
+):
+    """
+    Joint AV GRPO + AR supervised MSE training.
+
+    Each step:
+      1. Rollout: N activations → AV generates K descriptions each (on-policy, temp=1).
+      2. Reward: AR scores each → r = -MSE(norm(â), norm(h_l)); failed extractions → -2.0.
+      3. GRPO advantages: A_k = (r_k - mean) / std within each group of K.
+      4. AV loss: -mean(A_k * mean_token_logprob) + kl_coef * KL(π ‖ π_ref).
+      5. AR loss: MSE(norm(AR(desc)), norm(h_l)) on all valid descriptions.
+      6. Joint backward + constant-LR optimizer step (matches reference rl.sh).
+
+    av_ref: frozen SFT checkpoint of AV used for the KL penalty (pass None to disable KL).
+    AR is updated alongside AV — live reward model, not frozen (per reference design).
+    """
+    av_opt = torch.optim.AdamW(av.parameters(), lr=av_lr, weight_decay=0.0)
+    ar_opt = torch.optim.AdamW(ar.parameters(), lr=ar_lr, weight_decay=0.0)
+
+    if av_ref is not None:
+        av_ref.eval()
+        av_ref.requires_grad_(False)
+
+    # Build fixed AV prompt token IDs once
+    prompt_str = tok.apply_chat_template(
+        [{"role": "user", "content": AV_USER_PROMPT}],
+        tokenize=False, add_generation_prompt=True,
+    )
+    prompt_ids = tok(
+        prompt_str, add_special_tokens=False, return_tensors="pt"
+    )["input_ids"][0].to(device)
+
+    # Dataset index shuffling
+    idx = torch.randperm(len(dataset)).tolist()
+    pos = 0
+
+    for step in range(1, n_steps + 1):
+
+        # Sample N activations
+        if pos + n_prompts > len(idx):
+            idx = torch.randperm(len(dataset)).tolist()
+            pos = 0
+        acts = torch.tensor(
+            np.stack(dataset.select(idx[pos:pos + n_prompts])["activation"]),
+            dtype=torch.float32, device=device,
+        )
+        pos += n_prompts
+
+        # ── Rollout ──────────────────────────────────────────────────────────
+        av.eval()
+        ar.eval()
+        all_gen, all_desc, all_rew = _grpo_rollout(
+            av, ar, tok, prompt_ids, acts, n_samples, max_new_tokens, ar_max_length, device
+        )
+
+        # ── GRPO advantages ──────────────────────────────────────────────────
+        all_adv = []
+        for group_r in all_rew:
+            r   = torch.tensor(group_r, dtype=torch.float32)
+            adv = (r - r.mean()) / r.std().clamp(min=1e-8)
+            all_adv.append(adv.to(device))
+
+        # ── Training ──────────────────────────────────────────────────────────
+        av.train()
+        ar.train()
+        av_opt.zero_grad()
+        ar_opt.zero_grad()
+
+        pg_total = kl_total = ar_total = n_valid = 0
+
+        for i in range(n_prompts):
+            act_i  = acts[i]
+            act_K  = act_i.unsqueeze(0).expand(n_samples, -1)
+            adv_i  = all_adv[i]                                  # (K,) constants
+
+            # Policy gradient log probs (gradient flows through AV)
+            seq_lp  = _seq_log_probs(av, prompt_ids, all_gen[i], act_K, tok, device)
+            pg_loss = -(adv_i * seq_lp).mean()
+
+            # KL against frozen reference AV
+            kl_loss = torch.tensor(0.0, device=device)
+            if av_ref is not None and kl_coef > 0:
+                ref_lp  = _seq_log_probs(av_ref, prompt_ids, all_gen[i], act_K, tok, device, no_grad=True)
+                kl_loss = (seq_lp - ref_lp).mean()
+
+            # AR supervised MSE on generated descriptions
+            valid_ks = [k for k, d in enumerate(all_desc[i]) if d is not None]
+            ar_loss  = torch.tensor(0.0, device=device)
+            if valid_ks:
+                texts   = [f"{AR_PREFIX}{all_desc[i][k]}{AR_SUFFIX}" for k in valid_ks]
+                enc     = tok(texts, return_tensors="pt", padding=True,
+                              truncation=True, max_length=ar_max_length).to(device)
+                act_rep = act_i.unsqueeze(0).expand(len(valid_ks), -1)
+                a_hat   = ar(enc["input_ids"], enc["attention_mask"]).float()
+                ar_loss = F.mse_loss(a_hat, _normalize_to_sqrt_d(act_rep))
+                n_valid += len(valid_ks)
+
+            loss_i = (pg_loss + kl_coef * kl_loss + ar_loss) / n_prompts
+            loss_i.backward()
+
+            pg_total += pg_loss.item()
+            kl_total += kl_loss.item()
+            ar_total += ar_loss.item() if valid_ks else 0.0
+
+        torch.nn.utils.clip_grad_norm_(av.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(ar.parameters(), 1.0)
+        av_opt.step()
+        ar_opt.step()
+
+        if step % log_interval == 0:
+            mean_r = np.mean([r for g in all_rew for r in g])
+            print(f"Step {step:4d}/{n_steps}  "
+                  f"pg: {pg_total/n_prompts:+.4f}  "
+                  f"kl: {kl_total/n_prompts:.4f}  "
+                  f"ar: {ar_total/n_prompts:.4f}  "
+                  f"reward: {mean_r:.4f}  "
+                  f"valid: {n_valid}/{n_prompts * n_samples}")
+
+        if checkpoint_path is not None and step % save_interval == 0:
+            parent = Path(checkpoint_path).parent
+            stem   = Path(checkpoint_path).stem
+            torch.save(av.state_dict(), parent / f"{stem}_av_step{step}.pt")
+            torch.save(ar.state_dict(), parent / f"{stem}_ar_step{step}.pt")
+            print(f"  → checkpoints saved at step {step}")
+
+    return av, ar
