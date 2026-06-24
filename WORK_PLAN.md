@@ -51,9 +51,8 @@ Internalising this asymmetry is half the point of the project.
 
 ## Model and hardware choices
 
-- **Primary model:** Llama 3.2 1B (`d_model = 2048`, 16 layers). Probe layer ≈ **11** (2/3 of 16).
-- **Fast-iteration model:** Qwen2.5-0.5B — use this while debugging the plumbing; everything is
-  ~4× faster and fits trivially.
+- **Model used throughout:** Qwen2.5-0.5B (`d_model = 896`, 24 layers). Probe layer = **16** (2/3 depth).
+  Originally planned as a fast-iteration model; used for the full pipeline given GPU constraints.
 - **Hardware:** a single 24GB GPU (4090 / L40S / A100) is plenty at 1B. Keep `T`, `AV`, `AR` all
   resident; that's ~3×2GB in bf16 plus gradients/optimiser for `AV` and `AR` ≈ 12–15GB. No
   multi-GPU, no quantisation needed.
@@ -66,7 +65,7 @@ exercise for intuition, but the trainable pipeline lives in PyTorch.
 
 ---
 
-## Phase 0 — Environment and a frozen target (½ day)
+## Phase 0 — Environment and a frozen target ✅
 
 **Goal:** load the model, generate text, confirm shapes.
 
@@ -79,7 +78,7 @@ with `output_hidden_states=True`.
 
 ---
 
-## Phase 1 — Activation extraction harness (1 day, fully from scratch)
+## Phase 1 — Activation extraction harness ✅
 
 **Goal:** given a text snippet, return the residual-stream activation at layer `L`.
 
@@ -122,7 +121,7 @@ structure (clusters by topic). This is also a satisfying standalone interpretabi
 
 ---
 
-## Phase 2 — The Reconstructor `AR` and a baseline (1–2 days)
+## Phase 2 — The Reconstructor `AR` and a baseline ✅
 
 **Goal:** map text → predicted activation, and establish what "good" even means.
 
@@ -171,7 +170,7 @@ positive FVE (the oracle ceiling). You now have a number to chase.
 
 ---
 
-## Phase 3 — The Verbalizer `AV` architecture (1–2 days, the conceptual core)
+## Phase 3 — The Verbalizer `AV` architecture ✅
 
 **Goal:** make a transformer LM *read a vector* and write about it.
 
@@ -209,7 +208,7 @@ stage it'll mostly ignore the activation — that's expected and is exactly what
 
 ---
 
-## Phase 4 — Warm-start / supervised bootstrap (1–2 days)
+## Phase 4 — Warm-start / supervised bootstrap ✅
 
 **Why:** at initialisation `AV` writes activation-agnostic text, so the RL reward is pure noise and
 training won't move. The warm-start teaches `AV` to produce *relevant* text before RL refines it.
@@ -232,7 +231,7 @@ here is the project's first real "it works" moment.
 
 ---
 
-## Phase 5 — The RL phase: GRPO from scratch (3–5 days, the hard part)
+## Phase 5 — The RL phase: GRPO from scratch ✅
 
 **Why GRPO over PPO:** GRPO drops the value/critic network. You sample a *group* of `G` completions
 per prompt, use the group's mean reward as the baseline, and normalise advantages within the group.
@@ -289,46 +288,47 @@ description than from a random one.
 
 ---
 
-## Phase 6 — Evaluation and interpretability payoff (1–2 days)
+## Phase 6 — Evaluation and interpretability payoff 🔄
 
 This is where it stops being a training exercise and becomes interpretability.
 
-- **FVE curve** vs `log(steps)`, with the mean baseline (0) and text-oracle ceiling drawn in. This
-  single plot is your headline result.
-- **Held-out FVE** on snippets never seen in training — checks the `AV` learned to describe
-  activations, not memorise the corpus.
-- **Qualitative spot-checks.** Build a tiny viewer: snippet → activation → `AV` description →
-  `AR` reconstruction FVE. Read them. The descriptions are the interpretability output.
-- **Intervention sanity check (optional but illuminating).** Take an activation, get its
-  description, perturb the activation, and confirm the description changes sensibly. This probes
-  whether the explanation is *faithful* rather than a fluent guess.
+**Achieved:**
+- FVE tracked throughout training; progression AR 0.47 → AV warmstart 0.44 → GRPO **0.594**
+- `eval_fve_compare.py` for stable held-out comparison between checkpoint pairs
+
+**Remaining:**
+- **FVE curve** vs `log(steps)` plot, with mean baseline (0) and oracle ceiling
+- **Qualitative spot-checks** — planned as an interactive frontend (Phase 7)
+- **Intervention sanity check** — perturb activation, confirm description changes sensibly
 
 ---
 
 ## Phase 7 — Stretch goals (open-ended)
 
-- **Swap in TRL's GRPO** and compare against your hand-rolled loop — great for confirming your
+- **Interactive frontend** — a web UI to inspect the trained NLA: paste a text snippet, extract its
+  activation via the target model, generate a description with the AV, reconstruct with the AR, and
+  display the FVE alongside the description. This turns the pipeline into a usable interpretability
+  tool rather than just a training artifact.
+- **Better Stage 1 descriptions** — regenerate with Claude Haiku (4–5 features, 150–200 words) to
+  raise the description quality ceiling. This is the highest-leverage improvement available without
+  changing the model or architecture.
+- **Swap in TRL's GRPO** and compare against the hand-rolled loop — great for confirming
   understanding and seeing what the library handles (gradient accumulation, KL controllers, etc.).
-- **Replicate a paper case study** on your small model: probe different layers and see how the
-  descriptions change, mirroring the paper's layer-sensitivity discussion.
-- **Compare to logit lens / a tiny SAE** on the same activations — three lenses on the same vector
-  is a strong way to feel the differences you discussed earlier.
-- **Scale to 3B on CSF3** (`gpuA`, single A100) once the 1B pipeline is solid, checkpointing around
-  the 4-day wall-clock limit.
-- **Now read `kitft/natural_language_autoencoders`** end to end. Diff their choices against yours:
-  reward shaping, KL control, warm-start curriculum, pooling. You'll read it as a peer, not a
-  supplicant.
+- **Layer sensitivity study** — probe different layers (8, 12, 16, 20) and compare FVE and
+  description content, mirroring the paper's layer-sensitivity discussion.
+- **Compare to logit lens / a tiny SAE** on the same activations — three lenses on the same vector.
+- **Scale to Qwen2.5-1.5B or 3B** once the 0.5B pipeline is solid.
 
 ---
 
 ## Suggested timeline
 
-| Week | Focus | Deliverable |
-|------|-------|-------------|
-| 1 | Phases 0–2 | Activation harness + `AR` baseline + FVE metric + oracle ceiling |
-| 2 | Phases 3–4 | `AV` with injection + warm-start reaching positive FVE |
-| 3 | Phase 5 | Working GRPO loop, FVE rising above warm-start |
-| 4 | Phases 6–7 | Evaluation plots, qualitative viewer, then read the repo |
+| Week | Focus | Deliverable | Status |
+|------|-------|-------------|--------|
+| 1 | Phases 0–2 | Activation harness + `AR` baseline + FVE metric | ✅ AR FVE 0.47 |
+| 2 | Phases 3–4 | `AV` with injection + warm-start reaching positive FVE | ✅ AV e2e FVE 0.44 |
+| 3 | Phase 5 | Working GRPO loop, FVE rising above warm-start | ✅ GRPO FVE 0.594 |
+| 4 | Phases 6–7 | Evaluation, qualitative viewer, stretch goals | 🔄 Frontend next |
 
 ## The three things most likely to go wrong (bookmark these)
 

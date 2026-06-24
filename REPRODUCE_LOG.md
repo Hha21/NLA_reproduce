@@ -76,17 +76,9 @@ Reference uses `mse_scale=sqrt_d_model` — normalise each target h_l to L2 norm
 
 ## Stage 3 — AV Warm-Start Training
 
-**Status:** 🔄 In progress
+**Status:** ✅ Complete (best e2e FVE ≈ 0.44, saved to `checkpoints/av_warmstart.pt`)
 
-**Architecture:**
-- Base: full Qwen2.5-0.5B (all 24 layers + LM head), fully trainable
-- Injection: rare Unicode token `㊗` in prompt; its embedding is overwritten at forward time with h_l normalised to L2 norm = √896 ≈ 29.93
-- Prompt: full paper system prompt via `tok.apply_chat_template` (single user message)
-- Target: `<explanation>\n{summary}\n</explanation>` — LLM-generated explanations, same style AR was trained on
-
-**Current training config:** lr=5e-5, 10 epochs, batch=8, max_length=512, rows 50000..99999
-
-**End-to-end FVE:** After each epoch, the frozen AR is used to score 100 val samples — AV generates a description, AR reconstructs â, FVE(â, h_l) is logged. This is the real quality signal.
+**Final training config:** lr=2e-5, 3 epochs, best-val-loss checkpoint saved, rows 50000..99999
 
 ### Issue #12 — Wrong AV SFT target (text_truncated)
 First AV warm-start run used `text_truncated` as the generation target. Raw texts are long (~200–500 tokens) and highly varied; model memorised training examples rather than learning to condition on the activation. val_loss climbed while train_loss fell (severe overfitting). Fix: use `summary` (LLM explanation) as target — shorter, stylistically uniform, matches what AR expects.
@@ -101,16 +93,74 @@ First implementation used a simplified placeholder `"Explain: <concept>㊗</conc
 Reference (`actor_sft.sh`) trains for `NUM_EPOCH=1` on 250k AV samples. We trained for 10 epochs on 50k — 50x more gradient steps per parameter. val_loss peaked at epoch 1 (1.55) then diverged to 2.28 by epoch 9; e2e FVE peaked at epoch 1 (0.44) but no best-checkpoint was saved.
 
 Fix:
-- Added `checkpoint_path` parameter to `train_av()` — saves best val_loss model during training rather than the final epoch
-- Reduced epochs to 3 in `run_av_warmstart.sh` (3 × 50k ≈ reference 1 × 250k in total gradient steps)
-- LR reduced to 2e-5 (matching reference) from 5e-5
-
-Note on UltraFineWeb: reference `qwen7b_ultrafineweb_100k.yaml` explicitly warns the 1B-token Ultra-FineWeb subset is no longer on HuggingFace; recommends FineWeb sample-10BT for fresh reproduction.
+- Added `checkpoint_path` parameter to `train_av()` — saves best val_loss model during training
+- Reduced epochs 10→3 in `run_av_warmstart.sh` (3 × 50k ≈ reference 1 × 250k in total gradient steps)
+- LR reduced 5e-5→2e-5 (matching reference)
 
 ---
 
-## Pending
+## Stage 4 — Joint GRPO Training
 
-- [ ] Re-run AV warm-start (3 epochs, lr=2e-5, best-checkpoint saving)
-- [ ] Implement GRPO training loop (`scripts/train_grpo.py`)
-- [ ] Scale dataset: extract 400k more FineWeb activations + generate summaries to reach ~250k AV samples (matching reference scale, ~$16 DeepSeek cost)
+**Status:** ✅ Complete
+
+**Best checkpoint:** `checkpoints/grpo_av_step1000.pt` + `checkpoints/grpo_ar_step1000.pt`  
+**Best e2e FVE:** **0.594** (500-sample fixed eval, `activations/dataset`, seed=0)  
+**Reference (7B model):** FVE 0.752 at 4199 steps
+
+**Run 1 (original, 5000 steps):**
+- Data: `activations/dataset` (100K activations)
+- N=16 prompts × K=8 samples, lr=1.41e-5, KL=0.01, constant LR, rollout_batch=4
+- FVE at step 1000: 0.5746 (training log) — peak; essentially flat to step 5000 (0.5725)
+- Best checkpoint: step 1000
+
+**Run 2 (continuation from step 1000, 1001 steps):**
+- Started from grpo_av/ar_step1000.pt, reference AV = step 1000 checkpoint (KL from current position)
+- Data: `activations/rl_dataset` (partial 1M dataset)
+- KL divergence grew to 6.6 by step 1000 (vs 2.35 in original run at step 5000) — instability
+- FVE degraded: 0.5551 → 0.4965; reward degraded -0.29 → -0.37
+- Root cause: AV drifted aggressively from step-1000 reference with no stabilising force
+
+**FVE analysis:**
+- GRPO improved FVE from warmstart baseline (~0.44) to **0.594** — a meaningful 35% relative gain
+- Plateau after step 1000 suggests the 0.5B model is near its capacity ceiling for this task
+- Gap vs 7B paper result (0.75) is primarily model capacity (14× fewer params, smaller residual stream)
+- Description quality (2–3 features vs paper's 4–5) is a secondary limiting factor
+
+### Issue #16 — No FVE reported at step 1
+FVE eval was only triggered at save_interval boundaries. With save_interval=1000, step 1 showed no FVE, making it impossible to see the pre-GRPO baseline on the same val set. Fix: added `or step == 1` to the checkpoint/eval condition in `train_grpo()`.
+
+### Issue #17 — Script appeared frozen during rollout
+No progress output during the first rollout (N=16 × K=8 × 150 tokens generation, ~1–3 min). Fix: added `tqdm` progress bar to `_grpo_rollout()` showing `"step X/N rollout"` with per-batch-of-4 granularity.
+
+### Issue #18 — OOM during RL dataset generation
+`generate_data.py` crashed at 13% (134K/1M samples) with `torch.OutOfMemoryError: Tried to allocate 26.16 GiB`. Root cause: a ~92,000-token FineWeb document — no upper bound on extraction position caused the `lm_head` allocation to exceed GPU capacity (26 GB for 92K × vocab_size × 2 bytes). Fix: added `--max-seq-len 4096` cap in `run_generate_rl_data.sh`; 4096 tokens → ~1.25 GB lm_head allocation, safe with 16 GB headroom. Also added `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` to reduce fragmentation.
+
+### Issue #19 — RL data generation lost all progress on crash
+No intermediate saves meant 23 minutes of GPU work (134K samples) was lost at crash. Fix: added shard-based checkpointing to `generate_data.py` — saves a HuggingFace dataset shard every 50K samples (`--shard-size 50000`). On restart, completed shards are detected automatically and skipped (rng state replayed without GPU), resuming from the last complete shard. Final dataset is assembled by concatenating all shards.
+
+### Issue #20 — Misleading FVE comparison between GRPO runs
+The original GRPO run drew its val set from `activations/dataset` (last 200 of 100K); the continuation run used `activations/rl_dataset` (last 200 of 1M) — different activations, so the FVEs were not comparable. The same weights (step-1000 checkpoint) produced 0.5746 on one val set and 0.5551 on the other, making the runs appear to diverge before GRPO had even started. Fix: added `scripts/eval_fve_compare.py` — evaluates two checkpoint pairs on a single fixed 500-sample set (configurable seed) drawn from a specified dataset, giving an apples-to-apples comparison.
+
+### Issue #21 — Continuation run instability (KL explosion)
+KL divergence grew from 0 to 6.6 over 1000 continuation steps (vs 2.35 over 5000 original steps). The AV drifted aggressively from the step-1000 reference, and reward/FVE degraded. Root cause: the step-1000 AV was already near a local optimum; further policy gradient pressure pushed it out of the productive region with no strong restoring force. Higher KL coefficient would constrain drift but would also prevent improvement. Conclusion: 0.594 is close to the 0.5B capacity ceiling; further gains require better description quality (Stage 1) or a larger model.
+
+---
+
+## Summary of Results
+
+| Checkpoint | e2e FVE (500 samples) | Notes |
+|---|---|---|
+| AR baseline (SFT only) | 0.47 | AR warm-start ceiling |
+| AV warmstart | ~0.44 | AV generates descriptions the AR can partially decode |
+| grpo_av_step1000 | **0.594** | Best result; GRPO peak before plateau |
+| grpo_cont_av_step1000 | 0.525 | Continuation run, degraded due to instability |
+| Paper (7B model) | 0.752 | 4199 steps, reference run |
+
+---
+
+## Pending / Next Steps
+
+- [ ] Regenerate Stage 1 explanations with 4–5 feature prompt (Claude Haiku or DeepSeek-R1) — most impactful lever for improving FVE ceiling
+- [ ] Complete 1M RL dataset extraction (`run_generate_rl_data.sh`, now crash-resumable)
+- [ ] Frontend for qualitative inspection of AV outputs (snippet → activation → description)
+- [ ] Scale to larger model (e.g. Qwen2.5-1.5B or 3B) if GPU budget allows

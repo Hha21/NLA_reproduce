@@ -33,12 +33,6 @@ AV_CHECKPOINT = Path("checkpoints/av_warmstart.pt")
 AR_CHECKPOINT = Path("checkpoints/ar_baseline.pt")
 GRPO_BASE     = Path("checkpoints/grpo")   # → grpo_av_stepN.pt / grpo_ar_stepN.pt
 
-# Resolve checkpoint paths (CLI flags override defaults)
-av_ckpt   = Path(args.av_checkpoint)   if args.av_checkpoint   else AV_CHECKPOINT
-ar_ckpt   = Path(args.ar_checkpoint)   if args.ar_checkpoint   else AR_CHECKPOINT
-ref_ckpt  = Path(args.ref_checkpoint)  if args.ref_checkpoint  else av_ckpt
-grpo_base = Path(args.checkpoint_base) if args.checkpoint_base else GRPO_BASE
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--data-dir",         default="activations/dataset")
 parser.add_argument("--n-steps",          type=int,   default=500)
@@ -73,6 +67,12 @@ parser.add_argument("--checkpoint-base", default=None,
                          "(saves as <base>_av_stepN.pt / <base>_ar_stepN.pt). "
                          "Set a different path when resuming to avoid overwriting prior run.")
 args = parser.parse_args()
+
+# Resolve checkpoint paths (CLI flags override defaults)
+av_ckpt   = Path(args.av_checkpoint)   if args.av_checkpoint   else AV_CHECKPOINT
+ar_ckpt   = Path(args.ar_checkpoint)   if args.ar_checkpoint   else AR_CHECKPOINT
+ref_ckpt  = Path(args.ref_checkpoint)  if args.ref_checkpoint  else av_ckpt
+grpo_base = Path(args.checkpoint_base) if args.checkpoint_base else GRPO_BASE
 
 # --- Dataset (use full 100k; RL learns from reward not labels, overlap is OK) ---
 def _load_dataset(data_dir: str):
