@@ -604,7 +604,7 @@ def train_grpo(
                   f"reward: {mean_r:.4f}  "
                   f"valid: {n_valid}/{n_prompts * n_samples}")
 
-        if checkpoint_path is not None and (step % save_interval == 0 or step == n_steps):
+        if checkpoint_path is not None and (step % save_interval == 0 or step == n_steps or step == 1):
             parent = Path(checkpoint_path).parent
             stem   = Path(checkpoint_path).stem
             torch.save(av.state_dict(), parent / f"{stem}_av_step{step}.pt")

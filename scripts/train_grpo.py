@@ -33,25 +33,45 @@ AV_CHECKPOINT = Path("checkpoints/av_warmstart.pt")
 AR_CHECKPOINT = Path("checkpoints/ar_baseline.pt")
 GRPO_BASE     = Path("checkpoints/grpo")   # → grpo_av_stepN.pt / grpo_ar_stepN.pt
 
+# Resolve checkpoint paths (CLI flags override defaults)
+av_ckpt   = Path(args.av_checkpoint)   if args.av_checkpoint   else AV_CHECKPOINT
+ar_ckpt   = Path(args.ar_checkpoint)   if args.ar_checkpoint   else AR_CHECKPOINT
+ref_ckpt  = Path(args.ref_checkpoint)  if args.ref_checkpoint  else av_ckpt
+grpo_base = Path(args.checkpoint_base) if args.checkpoint_base else GRPO_BASE
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--data-dir",       default="activations/dataset")
-parser.add_argument("--n-steps",        type=int,   default=500)
-parser.add_argument("--n-prompts",      type=int,   default=16,
+parser.add_argument("--data-dir",         default="activations/dataset")
+parser.add_argument("--n-steps",          type=int,   default=500)
+parser.add_argument("--n-prompts",        type=int,   default=16,
                     help="Activations per rollout (N). Reference uses 128 on 8 GPUs.")
-parser.add_argument("--n-samples",      type=int,   default=8,
+parser.add_argument("--n-samples",        type=int,   default=8,
                     help="Descriptions per activation (K, GRPO group size).")
-parser.add_argument("--av-lr",          type=float, default=1.41e-5)
-parser.add_argument("--ar-lr",          type=float, default=1.41e-5)
-parser.add_argument("--kl-coef",        type=float, default=0.01)
-parser.add_argument("--max-new-tokens", type=int,   default=150)
-parser.add_argument("--rollout-batch",  type=int,   default=4,
+parser.add_argument("--av-lr",            type=float, default=1.41e-5)
+parser.add_argument("--ar-lr",            type=float, default=1.41e-5)
+parser.add_argument("--kl-coef",          type=float, default=0.01)
+parser.add_argument("--max-new-tokens",   type=int,   default=150)
+parser.add_argument("--rollout-batch",    type=int,   default=4,
                     help="Activations batched per av.generate() call. "
                          "Higher = faster rollout; reduce if OOM during generation.")
-parser.add_argument("--save-interval",  type=int,   default=100)
-parser.add_argument("--log-interval",   type=int,   default=10)
-parser.add_argument("--no-kl",         action="store_true",
+parser.add_argument("--save-interval",    type=int,   default=100)
+parser.add_argument("--log-interval",     type=int,   default=10)
+parser.add_argument("--no-kl",           action="store_true",
                     help="Disable KL penalty — skips loading reference AV. "
                          "Useful for smoke-testing or when memory is tight.")
+# Resume / checkpoint override
+parser.add_argument("--av-checkpoint",   default=None,
+                    help="AV weights to load. Default: checkpoints/av_warmstart.pt")
+parser.add_argument("--ar-checkpoint",   default=None,
+                    help="AR weights to load. Default: checkpoints/ar_baseline.pt")
+parser.add_argument("--ref-checkpoint",  default=None,
+                    help="Frozen reference AV for KL penalty. Default: same as --av-checkpoint "
+                         "(or av_warmstart.pt). When resuming, set this to the same checkpoint "
+                         "as --av-checkpoint so KL measures drift from the resume point, not "
+                         "from the original SFT policy.")
+parser.add_argument("--checkpoint-base", default=None,
+                    help="Base path for output checkpoints. Default: checkpoints/grpo  "
+                         "(saves as <base>_av_stepN.pt / <base>_ar_stepN.pt). "
+                         "Set a different path when resuming to avoid overwriting prior run.")
 args = parser.parse_args()
 
 # --- Dataset (use full 100k; RL learns from reward not labels, overlap is OK) ---
@@ -87,23 +107,23 @@ print(f"  Val set: {N_VAL} samples for e2e FVE at each checkpoint")
 # --- AV ---
 print("\nLoading AV...")
 av, tok = load_av(DEVICE)
-if AV_CHECKPOINT.exists():
-    av.load_state_dict(torch.load(AV_CHECKPOINT, map_location=DEVICE))
-    print(f"  Loaded from {AV_CHECKPOINT}")
+if av_ckpt.exists():
+    av.load_state_dict(torch.load(av_ckpt, map_location=DEVICE))
+    print(f"  Loaded from {av_ckpt}")
 else:
-    print(f"  WARNING: {AV_CHECKPOINT} not found — starting from base model weights")
+    print(f"  WARNING: {av_ckpt} not found — starting from base model weights")
 av.train()
 
-# --- Reference AV (frozen SFT copy, for KL penalty) ---
+# --- Reference AV (frozen copy, for KL penalty) ---
 av_ref = None
 if not args.no_kl:
-    if not AV_CHECKPOINT.exists():
-        print("\n  WARNING: no AV checkpoint for reference — disabling KL penalty")
+    if not ref_ckpt.exists():
+        print("\n  WARNING: no reference AV checkpoint — disabling KL penalty")
         args.no_kl = True
     else:
-        print("\nLoading reference AV (frozen, for KL)...")
+        print(f"\nLoading reference AV (frozen, for KL) from {ref_ckpt}...")
         av_ref, _ = load_av(DEVICE)
-        av_ref.load_state_dict(torch.load(AV_CHECKPOINT, map_location=DEVICE))
+        av_ref.load_state_dict(torch.load(ref_ckpt, map_location=DEVICE))
         av_ref.eval()
         av_ref.requires_grad_(False)
         print("  Reference AV loaded (frozen)")
@@ -111,11 +131,11 @@ if not args.no_kl:
 # --- AR (trained alongside AV — live reward model) ---
 print("\nLoading AR...")
 ar = load_ar(DEVICE, freeze_base=False)
-if AR_CHECKPOINT.exists():
-    ar.load_state_dict(torch.load(AR_CHECKPOINT, map_location=DEVICE))
-    print(f"  Loaded from {AR_CHECKPOINT}")
+if ar_ckpt.exists():
+    ar.load_state_dict(torch.load(ar_ckpt, map_location=DEVICE))
+    print(f"  Loaded from {ar_ckpt}")
 else:
-    print(f"  WARNING: {AR_CHECKPOINT} not found — starting from base model weights")
+    print(f"  WARNING: {ar_ckpt} not found — starting from base model weights")
 ar.train()
 
 # --- Train ---
@@ -124,7 +144,7 @@ print(f"\nStarting GRPO: {args.n_steps} steps, "
       f"KL={'off' if args.no_kl else args.kl_coef}")
 print()
 
-GRPO_BASE.parent.mkdir(parents=True, exist_ok=True)
+grpo_base.parent.mkdir(parents=True, exist_ok=True)
 
 train_grpo(
     av, av_ref, ar, ds, tok, DEVICE,
@@ -136,7 +156,7 @@ train_grpo(
     kl_coef         = 0.0 if args.no_kl else args.kl_coef,
     max_new_tokens  = args.max_new_tokens,
     rollout_batch   = args.rollout_batch,
-    checkpoint_path = str(GRPO_BASE),
+    checkpoint_path = str(grpo_base),
     save_interval   = args.save_interval,
     log_interval    = args.log_interval,
     val_acts        = val_acts,
