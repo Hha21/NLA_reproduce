@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Natural Language Autoencoder</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Natural Language Autoencoder</h1>
+      <div class="subtitle">A from-scratch reproduction on Qwen2.5-0.5B</div>
+    </div>
+    <div id="model-info">layer 16 · GRPO step 1000</div>
+  </header>
+
+  <main>
+    <!-- LEFT — chat -->
+    <section id="chat-panel" class="column">
+      <div class="column-header">
+        <h2>Chat</h2>
+        <div class="header-actions">
+          <button id="settings-toggle" class="btn-secondary" title="Generation settings">⚙</button>
+          <button id="new-chat-btn"    class="btn-secondary">New chat</button>
+        </div>
+      </div>
+
+      <div id="settings" class="hidden">
+        <label>
+          Max new tokens
+          <input id="max-tokens" type="number" value="200" min="1" max="1024" step="10">
+        </label>
+        <label>
+          Temperature
+          <input id="temperature" type="number" value="0.7" min="0" max="2" step="0.1">
+        </label>
+        <label>
+          Top-p
+          <input id="top-p" type="number" value="0.9" min="0.05" max="1" step="0.05">
+        </label>
+        <p class="hint">
+          Temperature 0 ⇒ greedy decoding. Base Qwen2.5-0.5B is not instruction-tuned;
+          treat the chat as text completion in a chat shell.
+        </p>
+      </div>
+
+      <div id="messages">
+        <div class="placeholder">No messages yet. Type something and press Enter.</div>
+      </div>
+
+      <div id="input-area">
+        <textarea id="chat-input" placeholder="Type a message…  (Enter to send, Shift+Enter for newline)" rows="3"></textarea>
+        <button id="send-btn" class="btn-primary">Send</button>
+      </div>
+    </section>
+
+    <!-- MIDDLE — raw token sequence -->
+    <section id="tokens-panel" class="column">
+      <div class="column-header">
+        <h2>Model context (tokens)</h2>
+        <span id="token-count" class="muted">0 tokens</span>
+      </div>
+      <p class="column-help">
+        These are the tokens the target model actually sees, with the chat
+        template applied. Click any token to explain its layer-16 activation.
+        The activation at token <em>i</em> depends on tokens 0…<em>i</em>
+        (highlighted faintly when you select).
+      </p>
+      <div id="tokens">
+        <div class="placeholder">Send a message to populate the model context.</div>
+      </div>
+      <div class="legend">
+        <span class="legend-swatch special"></span> special token
+        <span class="legend-swatch assistant"></span> assistant turn
+        <span class="legend-swatch selected"></span> selected
+        <span class="legend-swatch in-context"></span> in context
+      </div>
+    </section>
+
+    <!-- RIGHT — explanation -->
+    <aside id="explanation-panel" class="column">
+      <div class="column-header">
+        <h2>AV explanation</h2>
+      </div>
+      <div id="selected-token" class="muted">No token selected</div>
+      <div id="explanation" class="muted">Click any token in the middle panel to generate an explanation.</div>
+      <div id="metrics">
+        <div class="metric">
+          <span class="label">Reconstruction (cosine)</span>
+          <span id="reconstruction">—</span>
+        </div>
+        <div class="metric">
+          <span class="label">Per-sample FVE</span>
+          <span id="fve">—</span>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

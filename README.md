@@ -16,6 +16,7 @@ See [METHOD_PIPELINE.md](METHOD_PIPELINE.md) for a detailed walkthrough of every
 | 2 | AR warm-start training | ✅ Complete | val FVE ≈ 0.47 |
 | 3 | AV warm-start training | ✅ Complete | e2e FVE ≈ 0.44 (best epoch) |
 | 4 | Joint GRPO training | ✅ Complete | e2e FVE **0.594** (step 1000, 500-sample eval) |
+| 5 | Interactive web demo | 🔄 In progress | tokenise + per-token AV explanation working |
 
 **Reference (paper, 7B model):** FVE ≈ 0.75 at ~4200 steps.
 
@@ -55,6 +56,51 @@ Model weights (~1 GB for Qwen2.5-0.5B) are downloaded automatically from Hugging
 
 ---
 
+## Demo (web UI)
+
+A FastAPI server + static HTML/JS frontend laid out as three columns:
+
+1. **Chat** (left) — type a message, the target model generates a response with the chosen
+   sampling settings (max tokens, temperature, top-p). "New chat" resets the conversation.
+2. **Model context** (middle) — every token the target model actually sees, with the chat
+   template applied. Special tokens (`<|im_start|>`, …) are highlighted. Clicking any token
+   selects it and faintly shades all tokens that came before it (the activation at token *i*
+   depends on tokens 0…*i*).
+3. **AV explanation** (right) — the AV's natural-language explanation of the selected token's
+   layer-16 activation, plus two reconstruction metrics:
+   - **Reconstruction (cosine)** — angle between AR's prediction and the (sqrt-d-normalised)
+     activation. Bounded [−1, 1], higher is better.
+   - **Per-sample FVE** — 1 − ‖a − â‖² / ‖a − ā‖², where ā is the corpus-mean activation
+     (computed at startup from `activations/dataset`). Same definition as the corpus FVE in
+     [REPRODUCE_LOG.md](REPRODUCE_LOG.md), evaluated on a single sample.
+
+```bash
+# Once: copy your best GRPO checkpoints into models/
+cp checkpoints/grpo_av_step1000.pt models/av.pt
+cp checkpoints/grpo_ar_step1000.pt models/ar.pt
+
+# Run the server (binds 0.0.0.0:8000 so it's reachable over SSH/LAN)
+./.venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000/` in a browser. The first request takes a few seconds while the
+models load; `GET /api/health` confirms `"status": "ok"`.
+
+**Running on a remote machine over SSH?** Forward the port from your laptop:
+
+```bash
+ssh -L 8000:localhost:8000 your-user@<linux-box-host>
+```
+
+Then `http://localhost:8000` in your local browser reaches the remote server. See
+[server/README.md](server/README.md) for the JSON API.
+
+> **Note.** The target model is **base** Qwen2.5-0.5B (not Instruct), because the AV/AR were
+> trained on base-model activations. Chat-template generation will work but produce incoherent
+> responses — the demo is for inspecting *activations*, not for chatting.
+
+---
+
 ## Directory structure
 
 ```
@@ -87,11 +133,22 @@ NLA_reproduce/
 ├── activations/                  # datasets — gitignored
 │   ├── dataset/                  #   100K (text, activation) pairs + summaries
 │   └── rl_dataset/               #   1M activation-only pairs for GRPO (in progress)
-└── checkpoints/                  # saved model weights — gitignored
-    ├── ar_baseline.pt            #   AR after Stage 2 warm-start (FVE 0.47)
-    ├── av_warmstart.pt           #   AV after Stage 3 warm-start (best val_loss epoch)
-    ├── grpo_av_step1000.pt       #   AV after 1000 GRPO steps — best result (FVE 0.594)
-    └── grpo_ar_step1000.pt       #   AR after 1000 GRPO steps — best result
+├── checkpoints/                  # raw training outputs — gitignored
+│   ├── ar_baseline.pt            #   AR after Stage 2 warm-start (FVE 0.47)
+│   ├── av_warmstart.pt           #   AV after Stage 3 warm-start (best val_loss epoch)
+│   ├── grpo_av_step1000.pt       #   AV after 1000 GRPO steps — best result (FVE 0.594)
+│   └── grpo_ar_step1000.pt       #   AR after 1000 GRPO steps — best result
+├── models/                       # checkpoints served by the demo — gitignored
+│   ├── av.pt                     #   copy of grpo_av_step1000.pt
+│   └── ar.pt                     #   copy of grpo_ar_step1000.pt
+├── server/                       # FastAPI inference server
+│   ├── main.py                   #   routes, lifespan, static mount
+│   ├── inference.py              #   NLAInference: tokenize, analyze
+│   └── README.md
+└── frontend/                     # static client — no build tools
+    ├── index.html
+    ├── styles.css
+    └── app.js
 ```
 
 ---
